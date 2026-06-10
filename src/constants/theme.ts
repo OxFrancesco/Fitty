@@ -1,26 +1,50 @@
-/**
- * Below are the colors that are used in the app. The colors are defined in the light and dark mode.
- * There are many other ways to style your app. For example, [Nativewind](https://www.nativewind.dev/), [Tamagui](https://tamagui.dev/), [unistyles](https://reactnativeunistyles.vercel.app), etc.
- */
-
 import '@/global.css';
 
 import { Platform } from 'react-native';
 
+/**
+ * Fitty — Apple Health–style design language.
+ * Monochrome surfaces and text; color is reserved for the activity
+ * rings (and functional error red). System font throughout.
+ */
+
+/** Activity ring colors — the only color in the app */
+export const RingColors = {
+  steps: '#007AFF',
+  calories: '#FF3B30',
+  minutes: '#34C759',
+} as const;
+
+/** Functional error red */
+export const ErrorRed = '#FF3B30';
+
+/** Ring goal defaults */
+export const RingGoals = {
+  steps: 10_000,
+  calories: 500,
+  minutes: 30,
+} as const;
+
 export const Colors = {
   light: {
     text: '#000000',
-    background: '#ffffff',
-    backgroundElement: '#F0F0F3',
-    backgroundSelected: '#E0E1E6',
-    textSecondary: '#60646C',
+    background: '#F2F2F7',
+    backgroundElement: '#FFFFFF',
+    backgroundSelected: '#E4E4E9',
+    card: '#FFFFFF',
+    textSecondary: '#6E6E73',
+    separator: '#E5E5EA',
+    rule: '#000000',
   },
   dark: {
-    text: '#ffffff',
+    text: '#FFFFFF',
     background: '#000000',
-    backgroundElement: '#212225',
-    backgroundSelected: '#2E3135',
-    textSecondary: '#B0B4BA',
+    backgroundElement: '#1C1C1E',
+    backgroundSelected: '#2C2C2E',
+    card: '#1C1C1E',
+    textSecondary: '#98989E',
+    separator: '#38383A',
+    rule: '#FFFFFF',
   },
 } as const;
 
@@ -28,13 +52,9 @@ export type ThemeColor = keyof typeof Colors.light & keyof typeof Colors.dark;
 
 export const Fonts = Platform.select({
   ios: {
-    /** iOS `UIFontDescriptorSystemDesignDefault` */
     sans: 'system-ui',
-    /** iOS `UIFontDescriptorSystemDesignSerif` */
     serif: 'ui-serif',
-    /** iOS `UIFontDescriptorSystemDesignRounded` */
     rounded: 'ui-rounded',
-    /** iOS `UIFontDescriptorSystemDesignMonospaced` */
     mono: 'ui-monospace',
   },
   default: {
@@ -44,9 +64,9 @@ export const Fonts = Platform.select({
     mono: 'monospace',
   },
   web: {
-    sans: 'var(--font-display)',
+    sans: 'var(--font-sans)',
     serif: 'var(--font-serif)',
-    rounded: 'var(--font-rounded)',
+    rounded: 'var(--font-sans)',
     mono: 'var(--font-mono)',
   },
 });
@@ -62,4 +82,4 @@ export const Spacing = {
 } as const;
 
 export const BottomTabInset = Platform.select({ ios: 50, android: 80 }) ?? 0;
-export const MaxContentWidth = 800;
+export const MaxContentWidth = 540;

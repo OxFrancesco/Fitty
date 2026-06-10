@@ -56,6 +56,9 @@ export type ExerciseSummary = {
 };
 
 export type SleepSummary = {
+  id: string;
+  /** 'nap' when the API flags the session as a nap (or it looks like one) */
+  kind: 'sleep' | 'nap';
   startTime?: string;
   endTime?: string;
   minutesAsleep: number | null;
@@ -67,7 +70,8 @@ export type HealthSnapshot = {
   profile: Record<string, unknown> | null;
   metrics: HealthMetric[];
   exercises: ExerciseSummary[];
-  sleep: SleepSummary | null;
+  /** Sleep sessions in the range, most recent first */
+  sleepSessions: SleepSummary[];
   rangeLabel: string;
   raw: {
     rollups: Record<string, unknown>;
@@ -321,12 +325,49 @@ function normalizeSleep(point: DataPoint): SleepSummary | null {
     return null;
   }
 
+  const startTime = sleep.interval?.startTime;
+  const endTime = sleep.interval?.endTime;
+  const minutesAsleep = toNumber(sleep.summary?.minutesAsleep);
+  const minutesInSleepPeriod = toNumber(sleep.summary?.minutesInSleepPeriod);
+
   return {
-    startTime: sleep.interval?.startTime,
-    endTime: sleep.interval?.endTime,
-    minutesAsleep: toNumber(sleep.summary?.minutesAsleep),
-    minutesInSleepPeriod: toNumber(sleep.summary?.minutesInSleepPeriod),
+    id: String(point.name ?? `sleep-${startTime ?? endTime ?? 'unknown'}`),
+    kind: classifySleepKind(sleep, startTime, minutesInSleepPeriod ?? minutesAsleep),
+    startTime,
+    endTime,
+    minutesAsleep,
+    minutesInSleepPeriod,
   };
+}
+
+function classifySleepKind(
+  sleep: Record<string, any>,
+  startTime: string | undefined,
+  minutes: number | null
+): 'sleep' | 'nap' {
+  // The API labels naps explicitly (Sleep.metadata.nap, output-only boolean).
+  const nap = sleep.metadata?.nap;
+  if (typeof nap === 'boolean') {
+    return nap ? 'nap' : 'sleep';
+  }
+
+  // Fallback heuristic: short daytime sessions are naps.
+  const start = startTime ? new Date(startTime) : null;
+  const duration = minutes ?? 0;
+
+  if (start && !Number.isNaN(start.getTime())) {
+    const hour = start.getHours();
+    if (hour >= 9 && hour < 20 && duration > 0 && duration < 360) {
+      return 'nap';
+    }
+  }
+
+  return duration > 0 && duration < 120 ? 'nap' : 'sleep';
+}
+
+function sleepSortValue(session: SleepSummary) {
+  const date = session.endTime ? new Date(session.endTime) : null;
+  return date && !Number.isNaN(date.getTime()) ? date.getTime() : 0;
 }
 
 export async function fetchGoogleHealthSnapshot(
@@ -369,7 +410,7 @@ export async function fetchGoogleHealthSnapshot(
     ).catch((error) => ({ error: error instanceof Error ? error.message : String(error) })),
     googleHealthFetch<{ dataPoints?: DataPoint[] }>(
       accessToken,
-      `/users/me/dataTypes/sleep/dataPoints?page_size=5&filter=${encodeURIComponent(sleepFilter)}`
+      `/users/me/dataTypes/sleep/dataPoints?page_size=20&filter=${encodeURIComponent(sleepFilter)}`
     ).catch((error) => ({ error: error instanceof Error ? error.message : String(error) })),
   ]);
 
@@ -381,7 +422,10 @@ export async function fetchGoogleHealthSnapshot(
     profile,
     metrics: metricResults,
     exercises: exercisePoints.map(normalizeExercise),
-    sleep: normalizeSleep(sleepPoints[0] ?? {}),
+    sleepSessions: sleepPoints
+      .map(normalizeSleep)
+      .filter((session): session is SleepSummary => session !== null)
+      .sort((a, b) => sleepSortValue(b) - sleepSortValue(a)),
     rangeLabel,
     raw: {
       rollups,

@@ -7,22 +7,23 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
-  TextInput,
   View,
-  useColorScheme,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import Animated, { FadeInDown } from 'react-native-reanimated';
 
+import { ActivityRings } from '@/components/activity-rings';
+import { HealthCard } from '@/components/health-card';
+import { SleepCard } from '@/components/sleep-card';
 import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { Colors, MaxContentWidth, Spacing } from '@/constants/theme';
+import { ErrorRed, MaxContentWidth, Spacing } from '@/constants/theme';
+import { useTheme } from '@/hooks/use-theme';
 import { fetchApiJson, getApiBaseUrl } from '@/lib/api-base';
+import { DEBUG_ENABLED } from '@/lib/debug';
 import {
   fetchGoogleHealthSnapshot,
   formatMetricValue,
   GOOGLE_HEALTH_SCOPES,
   GOOGLE_OAUTH_DISCOVERY,
-  type ExerciseSummary,
   type GoogleHealthConfig,
   type GoogleTokenResponse,
   type HealthMetric,
@@ -32,41 +33,19 @@ import {
 WebBrowser.maybeCompleteAuthSession();
 
 type LoadState = 'idle' | 'loading' | 'loaded' | 'error';
-type DashboardRangeDays = 7 | 14 | 30 | 90;
-type ExerciseSortKey = 'date' | 'duration' | 'calories' | 'distance' | 'steps' | 'name';
-type SortDirection = 'asc' | 'desc';
-type ActivityPresenceFilter = 'all' | 'calories' | 'distance' | 'steps';
+type DashboardRangeDays = 1 | 7 | 14 | 30 | 90;
 
 const GOOGLE_NATIVE_REDIRECT_URI = 'com.francescooddo.fitty:/oauth';
 const RANGE_OPTIONS: Array<{ label: string; value: DashboardRangeDays }> = [
+  { label: 'Today', value: 1 },
   { label: '7D', value: 7 },
   { label: '14D', value: 14 },
   { label: '30D', value: 30 },
   { label: '90D', value: 90 },
 ];
-const EXERCISE_SORT_OPTIONS: Array<{ label: string; value: ExerciseSortKey }> = [
-  { label: 'Date', value: 'date' },
-  { label: 'Duration', value: 'duration' },
-  { label: 'Calories', value: 'calories' },
-  { label: 'Distance', value: 'distance' },
-  { label: 'Steps', value: 'steps' },
-  { label: 'Name', value: 'name' },
-];
-const ACTIVITY_FILTER_OPTIONS: Array<{ label: string; value: ActivityPresenceFilter }> = [
-  { label: 'All', value: 'all' },
-  { label: 'Calories', value: 'calories' },
-  { label: 'Distance', value: 'distance' },
-  { label: 'Steps', value: 'steps' },
-];
-const MIN_DURATION_OPTIONS = [
-  { label: 'Any', value: 0 },
-  { label: '10+ min', value: 10 },
-  { label: '30+ min', value: 30 },
-  { label: '60+ min', value: 60 },
-];
 
-function createOAuthState() {
-  return ExpoCrypto.randomUUID();
+function createOAuthState(appReturnUri: string) {
+  return `${ExpoCrypto.randomUUID()}.${encodeURIComponent(appReturnUri)}`;
 }
 
 function buildGoogleAuthUrl(config: GoogleHealthConfig, state: string) {
@@ -87,8 +66,7 @@ function buildGoogleAuthUrl(config: GoogleHealthConfig, state: string) {
 }
 
 export default function HomeScreen() {
-  const colorScheme = useColorScheme();
-  const colors = Colors[colorScheme === 'dark' ? 'dark' : 'light'];
+  const theme = useTheme();
   const [config, setConfig] = useState<GoogleHealthConfig | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [token, setToken] = useState<GoogleTokenResponse | null>(null);
@@ -96,22 +74,15 @@ export default function HomeScreen() {
   const [authState, setAuthState] = useState<LoadState>('idle');
   const [healthState, setHealthState] = useState<LoadState>('idle');
   const [error, setError] = useState<string | null>(null);
-  const [rangeDays, setRangeDays] = useState<DashboardRangeDays>(7);
-  const [visibleMetricIds, setVisibleMetricIds] = useState<string[]>(
-    () => placeholderMetrics.map((metric) => metric.id)
-  );
-  const [activityQuery, setActivityQuery] = useState('');
-  const [activityPresenceFilter, setActivityPresenceFilter] = useState<ActivityPresenceFilter>('all');
-  const [activityMinDuration, setActivityMinDuration] = useState(0);
-  const [exerciseSortKey, setExerciseSortKey] = useState<ExerciseSortKey>('date');
-  const [exerciseSortDirection, setExerciseSortDirection] = useState<SortDirection>('desc');
+  const [rangeDays, setRangeDays] = useState<DashboardRangeDays>(1);
+  const [showDebug, setShowDebug] = useState(false);
 
   useEffect(() => {
     let ignore = false;
 
     async function loadConfig() {
       try {
-        const data = await fetchApiJson<GoogleHealthConfig>('/api/google/config');
+        const data = await fetchApiJson<GoogleHealthConfig>(`/api/google/config?platform=${Platform.OS}`);
 
         if (!ignore) {
           setConfig(data);
@@ -154,10 +125,11 @@ export default function HomeScreen() {
     setError(null);
 
     try {
-      const state = createOAuthState();
+      const appReturnUri = config.appReturnUri || GOOGLE_NATIVE_REDIRECT_URI;
+      const state = createOAuthState(appReturnUri);
       const result = await WebBrowser.openAuthSessionAsync(
         buildGoogleAuthUrl(config, state),
-        config.appReturnUri || GOOGLE_NATIVE_REDIRECT_URI
+        appReturnUri
       );
 
       if (result.type !== 'success') {
@@ -215,321 +187,359 @@ export default function HomeScreen() {
   }, []);
 
   const canLogin = Boolean(config?.clientId && config.hasClientSecret && config.redirectUri && config.appReturnUri);
-  const dashboardMetrics = snapshot?.metrics ?? placeholderMetrics;
-  const visibleMetricSet = useMemo(() => new Set(visibleMetricIds), [visibleMetricIds]);
-  const visibleMetrics = useMemo(
-    () => dashboardMetrics.filter((metric) => visibleMetricSet.has(metric.id)),
-    [dashboardMetrics, visibleMetricSet]
+
+  // Extract ring data from metrics
+  const metricsMap = useMemo(() => {
+    const map: Record<string, HealthMetric> = {};
+    for (const m of snapshot?.metrics ?? placeholderMetrics) {
+      map[m.id] = m;
+    }
+    return map;
+  }, [snapshot?.metrics]);
+
+  const ringData = useMemo(
+    () => ({
+      steps: metricsMap['steps']?.value ?? null,
+      calories: metricsMap['active-energy-burned']?.value ?? null,
+      minutes: metricsMap['active-minutes']?.value ?? null,
+    }),
+    [metricsMap]
   );
-  const filteredExercises = useMemo(
+
+  // Secondary metrics (not shown in rings or vitals)
+  const secondaryMetrics = useMemo(
     () =>
-      filterAndSortExercises({
-        exercises: snapshot?.exercises ?? [],
-        query: activityQuery,
-        presenceFilter: activityPresenceFilter,
-        minDuration: activityMinDuration,
-        sortKey: exerciseSortKey,
-        sortDirection: exerciseSortDirection,
-      }),
-    [
-      activityMinDuration,
-      activityPresenceFilter,
-      activityQuery,
-      exerciseSortDirection,
-      exerciseSortKey,
-      snapshot?.exercises,
-    ]
+      (snapshot?.metrics ?? placeholderMetrics).filter(
+        (m) =>
+          !['steps', 'active-energy-burned', 'active-minutes', 'heart-rate', 'floors'].includes(m.id)
+      ),
+    [snapshot?.metrics]
   );
 
-  const toggleMetric = useCallback((metricId: string) => {
-    setVisibleMetricIds((current) =>
-      current.includes(metricId) ? current.filter((id) => id !== metricId) : [...current, metricId]
-    );
-  }, []);
+  // Heart rate
+  const heartRate = metricsMap['heart-rate']?.value;
+  const heartRateDisplay = heartRate !== null && heartRate !== undefined
+    ? Math.round(heartRate).toString()
+    : '--';
 
-  const resetDashboardControls = useCallback(() => {
-    setVisibleMetricIds(placeholderMetrics.map((metric) => metric.id));
-    setActivityQuery('');
-    setActivityPresenceFilter('all');
-    setActivityMinDuration(0);
-    setExerciseSortKey('date');
-    setExerciseSortDirection('desc');
-  }, []);
+  const userName = useMemo(() => {
+    if (token?.idToken) {
+      const decoded = decodeIdToken(token.idToken);
+      return decoded?.given_name ?? decoded?.name ?? 'User';
+    }
+    return 'User';
+  }, [token]);
 
-  return (
-    <ThemedView style={styles.screen}>
-      <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
-        <SafeAreaView style={styles.safeArea}>
-          <View style={styles.header}>
-            <View style={styles.titleGroup}>
-              <ThemedText style={styles.eyebrow} themeColor="textSecondary">
-                Google Health
-              </ThemedText>
-              <ThemedText type="title" style={styles.title}>
-                Fitty
-              </ThemedText>
-            </View>
+  // Greeting — time-aware
+  const hour = new Date().getHours();
+  const daypart = hour < 12 ? 'morning' : hour < 18 ? 'afternoon' : 'evening';
+  const greeting = userName === 'User' ? `Good ${daypart}` : `Good ${daypart}, ${userName}`;
+  const todayStr = new Date().toLocaleDateString(undefined, {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+  });
 
-            <StatusPill
-              label={token ? 'Connected' : authState === 'loading' ? 'Signing in' : 'Signed out'}
-              color={token ? '#0F9D58' : authState === 'loading' ? '#F4B400' : colors.textSecondary}
-            />
-          </View>
-
-          <ThemedView type="backgroundElement" style={styles.panel}>
-            <View style={styles.connectionHeader}>
-              <View style={styles.connectionText}>
-                <ThemedText type="subtitle" style={styles.panelTitle}>
-                  Google account
-                </ThemedText>
-                <ThemedText type="small" themeColor="textSecondary">
-                  {token ? 'Access token active for this session.' : 'OAuth code flow with server token exchange.'}
-                </ThemedText>
-              </View>
-
-              {authState === 'loading' ? (
-                <ActivityIndicator />
-              ) : token ? (
-                <ActionButton label="Sign out" variant="ghost" onPress={signOut} />
-              ) : (
-                <ActionButton label="Sign in" disabled={!canLogin} onPress={startGoogleSignIn} />
-              )}
-            </View>
-
-            <View style={styles.configGrid}>
-              <ConfigItem label="API server" value={getApiBaseUrl()} />
-              <ConfigItem label="Console redirect URI" value={config?.redirectUri ?? 'Loading'} />
-              <ConfigItem label="App callback URI" value={config?.appReturnUri ?? GOOGLE_NATIVE_REDIRECT_URI} />
-              <ConfigItem
-                label="OAuth client"
-                value={config?.clientId ? 'Configured' : configError ?? 'Loading'}
-              />
-              <ConfigItem
-                label="Client secret"
-                value={config?.hasClientSecret ? 'Server only' : 'Missing'}
-              />
-            </View>
-          </ThemedView>
+  // ── Auth gate: sign-in screen when not authenticated ──
+  if (!token) {
+    return (
+      <View style={[styles.signInScreen, { backgroundColor: theme.background }]}>
+        <View style={styles.signInContent}>
+          <ThemedText type="hero">Fitty</ThemedText>
+          <ThemedText type="small" style={{ color: theme.textSecondary }}>
+            Connects to Google Fit
+          </ThemedText>
 
           {error && <ErrorBanner message={error} />}
 
-          <View style={styles.sectionHeader}>
-            <View>
-              <ThemedText type="subtitle" style={styles.sectionTitle}>
-                Health data
-              </ThemedText>
-              <ThemedText type="small" themeColor="textSecondary">
-                {snapshot?.rangeLabel ?? 'Last 7 days'}
-              </ThemedText>
-            </View>
-
-            {token && (
-              <ActionButton
-                label="Refresh"
-                variant="ghost"
-                disabled={healthState === 'loading'}
-                onPress={refreshHealthData}
-              />
-            )}
-          </View>
-
-          <ThemedView type="backgroundElement" style={styles.panel}>
-            <View style={styles.controlsHeader}>
-              <ThemedText type="subtitle" style={styles.panelTitle}>
-                Dashboard controls
-              </ThemedText>
-              <ActionButton label="Reset" variant="ghost" onPress={resetDashboardControls} />
-            </View>
-
-            <ControlGroup label="Date range">
-              <View style={styles.chipRow}>
-                {RANGE_OPTIONS.map((option) => (
-                  <FilterChip
-                    key={option.value}
-                    label={option.label}
-                    active={rangeDays === option.value}
-                    disabled={healthState === 'loading'}
-                    onPress={() => updateRangeDays(option.value)}
-                  />
-                ))}
-              </View>
-            </ControlGroup>
-
-            <ControlGroup label="Metrics">
-              <View style={styles.chipRow}>
-                {dashboardMetrics.map((metric) => (
-                  <FilterChip
-                    key={metric.id}
-                    label={metric.label}
-                    active={visibleMetricSet.has(metric.id)}
-                    onPress={() => toggleMetric(metric.id)}
-                  />
-                ))}
-              </View>
-            </ControlGroup>
-
-            <ControlGroup label="Activity search">
-              <TextInput
-                value={activityQuery}
-                onChangeText={setActivityQuery}
-                placeholder="Name or type"
-                placeholderTextColor={colors.textSecondary}
-                autoCapitalize="none"
-                autoCorrect={false}
-                style={[
-                  styles.searchInput,
-                  {
-                    color: colors.text,
-                    borderColor: colors.backgroundSelected,
-                    backgroundColor: colors.background,
-                  },
-                ]}
-              />
-            </ControlGroup>
-
-            <View style={styles.controlColumns}>
-              <ControlGroup label="Activity sort">
-                <View style={styles.chipRow}>
-                  {EXERCISE_SORT_OPTIONS.map((option) => (
-                    <FilterChip
-                      key={option.value}
-                      label={option.label}
-                      active={exerciseSortKey === option.value}
-                      onPress={() => setExerciseSortKey(option.value)}
-                    />
-                  ))}
-                  <FilterChip
-                    label={exerciseSortDirection === 'desc' ? 'High first' : 'Low first'}
-                    active
-                    onPress={() =>
-                      setExerciseSortDirection((direction) => (direction === 'desc' ? 'asc' : 'desc'))
-                    }
-                  />
-                </View>
-              </ControlGroup>
-
-              <ControlGroup label="Activity filter">
-                <View style={styles.chipRow}>
-                  {ACTIVITY_FILTER_OPTIONS.map((option) => (
-                    <FilterChip
-                      key={option.value}
-                      label={option.label}
-                      active={activityPresenceFilter === option.value}
-                      onPress={() => setActivityPresenceFilter(option.value)}
-                    />
-                  ))}
-                </View>
-              </ControlGroup>
-
-              <ControlGroup label="Duration">
-                <View style={styles.chipRow}>
-                  {MIN_DURATION_OPTIONS.map((option) => (
-                    <FilterChip
-                      key={option.value}
-                      label={option.label}
-                      active={activityMinDuration === option.value}
-                      onPress={() => setActivityMinDuration(option.value)}
-                    />
-                  ))}
-                </View>
-              </ControlGroup>
-            </View>
-          </ThemedView>
-
-          {healthState === 'loading' && (
-            <ThemedView type="backgroundElement" style={styles.loadingPanel}>
-              <ActivityIndicator />
-              <ThemedText type="small" themeColor="textSecondary">
-                Loading Google Health data
-              </ThemedText>
-            </ThemedView>
+          {authState === 'loading' ? (
+            <ActivityIndicator color={theme.textSecondary} size="large" />
+          ) : (
+            <ActionButton label="Sign in with Google" disabled={!canLogin} onPress={startGoogleSignIn} />
           )}
 
-          <View style={styles.metricGrid}>
-            {visibleMetrics.map((metric) => (
-              <MetricCard key={metric.id} metric={metric} />
-            ))}
-          </View>
-          {!visibleMetrics.length && (
-            <ThemedView type="backgroundElement" style={styles.loadingPanel}>
-              <EmptyText label="No metrics selected." />
-              <ActionButton
-                label="Show all"
-                variant="ghost"
-                onPress={() => setVisibleMetricIds(placeholderMetrics.map((metric) => metric.id))}
-              />
-            </ThemedView>
+          {DEBUG_ENABLED && (
+            <DebugPanel
+              expanded={showDebug}
+              onToggle={() => setShowDebug((v) => !v)}
+              items={[
+                { label: 'API server', value: getApiBaseUrl() },
+                { label: 'Redirect URI', value: config?.redirectUri ?? 'Loading' },
+                { label: 'Callback URI', value: config?.appReturnUri ?? GOOGLE_NATIVE_REDIRECT_URI },
+                { label: 'OAuth client', value: config?.clientId ? 'Configured' : configError ?? 'Loading' },
+                { label: 'Client secret', value: config?.hasClientSecret ? 'Server only' : 'Missing' },
+              ]}
+            />
           )}
+        </View>
+      </View>
+    );
+  }
 
-          <View style={styles.twoColumn}>
-            <ThemedView type="backgroundElement" style={styles.panel}>
-              <View style={styles.panelHeadingRow}>
-                <ThemedText type="subtitle" style={styles.panelTitle}>
-                  Exercise
-                </ThemedText>
-                <ThemedText type="small" themeColor="textSecondary">
-                  {snapshot ? `${filteredExercises.length}/${snapshot.exercises.length}` : '0/0'}
-                </ThemedText>
-              </View>
-
-              {filteredExercises.length ? (
-                <View style={styles.list}>
-                  {filteredExercises.map((exercise) => (
-                    <View key={exercise.id} style={styles.listItem}>
-                      <View style={styles.listItemMain}>
-                        <ThemedText type="smallBold">{exercise.name}</ThemedText>
-                        <ThemedText type="small" themeColor="textSecondary">
-                          {formatDateTime(exercise.startTime)} | {exercise.type}
-                        </ThemedText>
-                      </View>
-                      <View style={styles.exerciseStats}>
-                        <ExerciseStat label="Active" value={formatMinutes(exercise.activeMinutes)} />
-                        <ExerciseStat label="Kcal" value={formatOptionalNumber(exercise.caloriesKcal)} />
-                        <ExerciseStat label="Km" value={formatOptionalDistance(exercise.distanceKm)} />
-                      </View>
-                    </View>
-                  ))}
-                </View>
-              ) : (
-                <EmptyText
-                  label={
-                    token && snapshot?.exercises.length
-                      ? 'No exercise matches these controls.'
-                      : token
-                        ? 'No exercise sessions in this range.'
-                        : 'Sign in to load exercise.'
-                  }
+  // ── Authenticated dashboard ──
+  return (
+    <ScrollView
+      style={{ flex: 1, backgroundColor: theme.background }}
+      contentContainerStyle={styles.scrollContent}
+      contentInsetAdjustmentBehavior="automatic"
+    >
+      <View style={styles.container}>
+        {/* ── Header ── */}
+        <Section index={0}>
+          <View style={styles.headerBlock}>
+            <View style={styles.headerTopRow}>
+              <ThemedText type="smallBold" style={[styles.dateLabel, { color: theme.textSecondary }]}>
+                {todayStr}
+              </ThemedText>
+              <View style={styles.headerButtons}>
+                <TextButton
+                  label="Sync"
+                  color={theme.text}
+                  onPress={refreshHealthData}
+                  disabled={healthState === 'loading'}
                 />
-              )}
-            </ThemedView>
-
-            <ThemedView type="backgroundElement" style={styles.panel}>
-              <ThemedText type="subtitle" style={styles.panelTitle}>
-                Sleep
-              </ThemedText>
-
-              {snapshot?.sleep ? (
-                <View style={styles.sleepGrid}>
-                  <ConfigItem
-                    label="Asleep"
-                    value={
-                      snapshot.sleep.minutesAsleep === null
-                        ? '--'
-                        : `${snapshot.sleep.minutesAsleep} min`
-                    }
-                  />
-                  <ConfigItem label="Ended" value={formatDateTime(snapshot.sleep.endTime)} />
-                </View>
-              ) : (
-                <EmptyText label={token ? 'No sleep session in this range.' : 'Sign in to load sleep.'} />
-              )}
-            </ThemedView>
+                <TextButton label="Sign out" color={theme.textSecondary} onPress={signOut} />
+              </View>
+            </View>
+            <ThemedText type="title">{greeting}</ThemedText>
           </View>
-        </SafeAreaView>
-      </ScrollView>
-    </ThemedView>
+        </Section>
+
+        {error && <ErrorBanner message={error} />}
+
+        {/* ── Range segmented control ── */}
+        <Section index={1}>
+          <View style={[styles.segments, { backgroundColor: theme.backgroundSelected }]}>
+            {RANGE_OPTIONS.map((option) => {
+              const active = rangeDays === option.value;
+              return (
+                <Pressable
+                  key={option.value}
+                  disabled={healthState === 'loading'}
+                  onPress={() => updateRangeDays(option.value)}
+                  style={({ pressed }) => [
+                    styles.segment,
+                    active && { backgroundColor: theme.text },
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <ThemedText
+                    type="smallBold"
+                    style={{ color: active ? theme.background : theme.textSecondary }}
+                  >
+                    {option.label}
+                  </ThemedText>
+                </Pressable>
+              );
+            })}
+          </View>
+        </Section>
+
+        {/* ── Activity rings ── */}
+        <Section index={2}>
+          <View style={[styles.ringsCard, { backgroundColor: theme.card }]}>
+            <ActivityRings data={ringData} />
+          </View>
+        </Section>
+
+        {healthState === 'loading' && (
+          <View style={styles.loadingRow}>
+            <ActivityIndicator color={theme.textSecondary} />
+            <ThemedText type="small" style={{ color: theme.textSecondary }}>
+              Syncing…
+            </ThemedText>
+          </View>
+        )}
+
+        {/* ── Vitals ── */}
+        <Section index={3}>
+          <SectionHeader title="Vitals" />
+          <View style={styles.cardRow}>
+            <SleepCard sessions={snapshot?.sleepSessions ?? []} />
+            <HealthCard label="Heart rate" value={heartRateDisplay} unit="bpm" />
+          </View>
+        </Section>
+
+        {/* ── Measures ── */}
+        {secondaryMetrics.length > 0 && (
+          <Section index={4}>
+            <SectionHeader title="Measures" />
+            <View style={styles.metricGrid}>
+              {secondaryMetrics.map((metric) => (
+                <MetricCard key={metric.id} metric={metric} />
+              ))}
+            </View>
+          </Section>
+        )}
+
+        {/* ── Connection diagnostics (debug builds only) ── */}
+        {DEBUG_ENABLED && (
+          <DebugPanel
+            expanded={showDebug}
+            onToggle={() => setShowDebug((v) => !v)}
+            items={[
+              { label: 'Status', value: 'Connected' },
+              { label: 'API server', value: getApiBaseUrl() },
+              { label: 'Redirect URI', value: config?.redirectUri ?? 'Loading' },
+              { label: 'Callback URI', value: config?.appReturnUri ?? GOOGLE_NATIVE_REDIRECT_URI },
+              { label: 'OAuth client', value: config?.clientId ? 'Configured' : configError ?? 'Loading' },
+              { label: 'Client secret', value: config?.hasClientSecret ? 'Server only' : 'Missing' },
+              { label: 'Range', value: snapshot?.rangeLabel ?? `Last ${rangeDays} days` },
+            ]}
+          />
+        )}
+      </View>
+    </ScrollView>
   );
 }
+
+// ─── Sub-components ────────────────────────────────────────────────────────────
+
+/** Staggered entrance for dashboard sections — one orchestrated page load. */
+function Section({ index, children }: { index: number; children: ReactNode }) {
+  return (
+    <Animated.View
+      entering={FadeInDown.duration(450).delay(index * 70)}
+      style={{ gap: Spacing.three }}
+    >
+      {children}
+    </Animated.View>
+  );
+}
+
+function SectionHeader({ title, trailing }: { title: string; trailing?: ReactNode }) {
+  return (
+    <View style={styles.sectionHeader}>
+      <ThemedText type="subtitle">{title}</ThemedText>
+      {trailing}
+    </View>
+  );
+}
+
+function ActionButton({
+  label,
+  onPress,
+  disabled,
+}: {
+  label: string;
+  onPress?: () => void;
+  disabled?: boolean;
+}) {
+  const theme = useTheme();
+
+  return (
+    <Pressable
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.actionButton,
+        { backgroundColor: theme.text },
+        disabled && styles.disabled,
+        pressed && !disabled && styles.pressed,
+      ]}>
+      <ThemedText type="default" style={{ color: theme.background, fontWeight: 600 }}>
+        {label}
+      </ThemedText>
+    </Pressable>
+  );
+}
+
+function TextButton({
+  label,
+  onPress,
+  disabled,
+  color,
+}: {
+  label: string;
+  onPress?: () => void;
+  disabled?: boolean;
+  color: string;
+}) {
+  return (
+    <Pressable
+      disabled={disabled}
+      onPress={onPress}
+      hitSlop={8}
+      style={({ pressed }) => [disabled && styles.disabled, pressed && !disabled && styles.pressed]}
+    >
+      <ThemedText type="smallBold" style={{ color }}>
+        {label}
+      </ThemedText>
+    </Pressable>
+  );
+}
+
+function MetricCard({ metric }: { metric: HealthMetric }) {
+  const theme = useTheme();
+
+  return (
+    <View style={[styles.metricCard, { backgroundColor: theme.card }]}>
+      <ThemedText type="caption" style={{ color: theme.textSecondary }}>
+        {metric.label}
+      </ThemedText>
+      <View style={styles.metricValueRow}>
+        <ThemedText type="metric">{formatMetricValue(metric)}</ThemedText>
+        {metric.unit.toLowerCase() !== metric.label.toLowerCase() && (
+          <ThemedText type="small" style={{ color: theme.textSecondary }}>
+            {metric.unit}
+          </ThemedText>
+        )}
+      </View>
+    </View>
+  );
+}
+
+function DebugPanel({
+  expanded,
+  onToggle,
+  items,
+}: {
+  expanded: boolean;
+  onToggle: () => void;
+  items: Array<{ label: string; value: string }>;
+}) {
+  const theme = useTheme();
+
+  return (
+    <View style={{ gap: Spacing.two, alignSelf: 'stretch' }}>
+      <Pressable onPress={onToggle} style={styles.debugToggle}>
+        <ThemedText type="small" style={{ color: theme.textSecondary }}>
+          Connection details {expanded ? '▾' : '▸'}
+        </ThemedText>
+      </Pressable>
+
+      {expanded && (
+        <View style={[styles.debugPanel, { backgroundColor: theme.card }]}>
+          {items.map((item) => (
+            <View key={item.label} style={styles.configItem}>
+              <ThemedText type="caption" style={{ color: theme.textSecondary }}>
+                {item.label}
+              </ThemedText>
+              <ThemedText type="code" selectable>
+                {item.value}
+              </ThemedText>
+            </View>
+          ))}
+        </View>
+      )}
+    </View>
+  );
+}
+
+function ErrorBanner({ message }: { message: string }) {
+  return (
+    <View style={styles.errorBanner}>
+      <ThemedText type="smallBold" style={{ color: ErrorRed }}>
+        Error
+      </ThemedText>
+      <ThemedText type="small" style={{ color: ErrorRed }}>
+        {message}
+      </ThemedText>
+    </View>
+  );
+}
+
+// ─── Helpers (unchanged logic) ─────────────────────────────────────────────────
 
 const placeholderMetrics: HealthMetric[] = [
   { id: 'steps', label: 'Steps', value: null, unit: 'steps', status: 'empty' },
@@ -537,473 +547,135 @@ const placeholderMetrics: HealthMetric[] = [
   { id: 'total-calories', label: 'Total calories', value: null, unit: 'kcal', status: 'empty' },
   { id: 'active-minutes', label: 'Active minutes', value: null, unit: 'min', status: 'empty' },
   { id: 'distance', label: 'Distance', value: null, unit: 'km', status: 'empty' },
-  { id: 'floors', label: 'Floors', value: null, unit: 'floors', status: 'empty' },
   { id: 'heart-rate', label: 'Avg heart rate', value: null, unit: 'bpm', status: 'empty' },
 ];
 
-function ActionButton({
-  label,
-  onPress,
-  disabled,
-  variant = 'primary',
-}: {
-  label: string;
-  onPress?: () => void;
-  disabled?: boolean;
-  variant?: 'primary' | 'ghost';
-}) {
-  return (
-    <Pressable
-      disabled={disabled}
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.button,
-        variant === 'ghost' ? styles.ghostButton : styles.primaryButton,
-        disabled && styles.disabledButton,
-        pressed && !disabled && styles.pressed,
-      ]}>
-      <ThemedText type="smallBold" style={variant === 'primary' && styles.primaryButtonText}>
-        {label}
-      </ThemedText>
-    </Pressable>
-  );
-}
+function decodeIdToken(idToken: string): { name?: string; given_name?: string; email?: string } | null {
+  try {
+    const parts = idToken.split('.');
+    if (parts.length !== 3) {
+      return null;
+    }
+    const payload = parts[1];
+    const base64Url = payload.replace(/-/g, '+').replace(/_/g, '/');
+    let base64 = base64Url;
+    while (base64.length % 4) {
+      base64 += '=';
+    }
 
-function StatusPill({ label, color }: { label: string; color: string }) {
-  return (
-    <View style={[styles.statusPill, { borderColor: color }]}>
-      <View style={[styles.statusDot, { backgroundColor: color }]} />
-      <ThemedText type="smallBold">{label}</ThemedText>
-    </View>
-  );
-}
-
-function ConfigItem({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={styles.configItem}>
-      <ThemedText type="code" themeColor="textSecondary" style={styles.configLabel}>
-        {label}
-      </ThemedText>
-      <ThemedText type="small" style={styles.configValue}>
-        {value}
-      </ThemedText>
-    </View>
-  );
-}
-
-function MetricCard({ metric }: { metric: HealthMetric }) {
-  const statusColor =
-    metric.status === 'error' ? '#DB4437' : metric.status === 'loaded' ? '#0F9D58' : '#9AA0A6';
-
-  return (
-    <ThemedView type="backgroundElement" style={styles.metricCard}>
-      <View style={styles.metricTitleRow}>
-        <ThemedText type="smallBold">{metric.label}</ThemedText>
-        <View style={[styles.metricStatus, { backgroundColor: statusColor }]} />
-      </View>
-      <View style={styles.metricValueRow}>
-        <ThemedText style={styles.metricValue}>{formatMetricValue(metric)}</ThemedText>
-        <ThemedText type="small" themeColor="textSecondary">
-          {metric.unit}
-        </ThemedText>
-      </View>
-      {metric.error && (
-        <ThemedText type="code" themeColor="textSecondary" numberOfLines={2}>
-          {metric.error}
-        </ThemedText>
-      )}
-    </ThemedView>
-  );
-}
-
-function ErrorBanner({ message }: { message: string }) {
-  return (
-    <View style={styles.errorBanner}>
-      <ThemedText type="smallBold" style={styles.errorTitle}>
-        Error
-      </ThemedText>
-      <ThemedText type="small" style={styles.errorText}>
-        {message}
-      </ThemedText>
-    </View>
-  );
-}
-
-function EmptyText({ label }: { label: string }) {
-  return (
-    <ThemedText type="small" themeColor="textSecondary" style={styles.emptyText}>
-      {label}
-    </ThemedText>
-  );
-}
-
-function ControlGroup({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <View style={styles.controlGroup}>
-      <ThemedText type="code" themeColor="textSecondary" style={styles.configLabel}>
-        {label}
-      </ThemedText>
-      {children}
-    </View>
-  );
-}
-
-function FilterChip({
-  label,
-  active,
-  disabled,
-  onPress,
-}: {
-  label: string;
-  active?: boolean;
-  disabled?: boolean;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable
-      disabled={disabled}
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.chip,
-        active ? styles.activeChip : styles.inactiveChip,
-        disabled && styles.disabledButton,
-        pressed && !disabled && styles.pressed,
-      ]}>
-      <ThemedText type="smallBold" style={active && styles.activeChipText}>
-        {label}
-      </ThemedText>
-    </Pressable>
-  );
-}
-
-function ExerciseStat({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={styles.exerciseStat}>
-      <ThemedText type="code" themeColor="textSecondary">
-        {label}
-      </ThemedText>
-      <ThemedText type="smallBold" style={styles.exerciseStatValue}>
-        {value}
-      </ThemedText>
-    </View>
-  );
-}
-
-function filterAndSortExercises({
-  exercises,
-  query,
-  presenceFilter,
-  minDuration,
-  sortKey,
-  sortDirection,
-}: {
-  exercises: ExerciseSummary[];
-  query: string;
-  presenceFilter: ActivityPresenceFilter;
-  minDuration: number;
-  sortKey: ExerciseSortKey;
-  sortDirection: SortDirection;
-}) {
-  const normalizedQuery = query.trim().toLowerCase();
-
-  return exercises
-    .filter((exercise) => {
-      const matchesSearch =
-        !normalizedQuery ||
-        exercise.name.toLowerCase().includes(normalizedQuery) ||
-        exercise.type.toLowerCase().includes(normalizedQuery);
-
-      if (!matchesSearch) {
-        return false;
+    let decoded = '';
+    const atobFunc = typeof atob === 'function' ? atob : (typeof globalThis !== 'undefined' && typeof (globalThis as any).atob === 'function' ? (globalThis as any).atob : null);
+    if (atobFunc) {
+      decoded = atobFunc(base64);
+    } else {
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+      const lookup = new Uint8Array(256);
+      for (let i = 0; i < chars.length; i++) {
+        lookup[chars.charCodeAt(i)] = i;
       }
-
-      if ((exercise.activeMinutes ?? 0) < minDuration) {
-        return false;
+      const bufferLength = base64.length * 0.75;
+      const len = base64.length;
+      let p = 0;
+      if (base64[len - 1] === '=') {
+        p++;
+        if (base64[len - 2] === '=') {
+          p++;
+        }
       }
+      const bytes = new Uint8Array(bufferLength - p);
+      let coords = 0;
+      for (let i = 0; i < len; i += 4) {
+        const chunk = (lookup[base64.charCodeAt(i)] << 18) |
+                      (lookup[base64.charCodeAt(i + 1)] << 12) |
+                      (lookup[base64.charCodeAt(i + 2)] << 6) |
+                      lookup[base64.charCodeAt(i + 3)];
 
-      if (presenceFilter === 'calories') {
-        return exercise.caloriesKcal !== null;
+        bytes[coords++] = (chunk >> 16) & 255;
+        if (coords < bytes.length) bytes[coords++] = (chunk >> 8) & 255;
+        if (coords < bytes.length) bytes[coords++] = chunk & 255;
       }
-
-      if (presenceFilter === 'distance') {
-        return exercise.distanceKm !== null;
+      for (let i = 0; i < bytes.length; i++) {
+        decoded += String.fromCharCode(bytes[i]);
       }
+    }
 
-      if (presenceFilter === 'steps') {
-        return exercise.steps !== null;
-      }
-
-      return true;
-    })
-    .sort((left, right) => compareExercises(left, right, sortKey, sortDirection));
+    const utf8String = decodeURIComponent(
+      decoded
+        .split('')
+        .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
+        .join('')
+    );
+    return JSON.parse(utf8String);
+  } catch (e) {
+    console.warn('Failed to decode ID token:', e);
+    return null;
+  }
 }
 
-function compareExercises(
-  left: ExerciseSummary,
-  right: ExerciseSummary,
-  sortKey: ExerciseSortKey,
-  sortDirection: SortDirection
-) {
-  if (sortKey === 'name') {
-    const result = left.name.localeCompare(right.name);
-    return sortDirection === 'asc' ? result : -result;
-  }
+// ─── Styles ────────────────────────────────────────────────────────────────────
+// Apple Health–style: grouped gray background, borderless rounded cards,
+// monochrome controls. Color lives in the rings only.
 
-  const leftValue = getExerciseSortValue(left, sortKey);
-  const rightValue = getExerciseSortValue(right, sortKey);
-
-  if (leftValue === null && rightValue === null) {
-    return 0;
-  }
-
-  if (leftValue === null) {
-    return 1;
-  }
-
-  if (rightValue === null) {
-    return -1;
-  }
-
-  const result = leftValue - rightValue;
-  return sortDirection === 'asc' ? result : -result;
-}
-
-function getExerciseSortValue(exercise: ExerciseSummary, sortKey: ExerciseSortKey) {
-  if (sortKey === 'date') {
-    const date = exercise.startTime ? new Date(exercise.startTime) : null;
-    return date && !Number.isNaN(date.getTime()) ? date.getTime() : null;
-  }
-
-  if (sortKey === 'duration') {
-    return exercise.activeMinutes;
-  }
-
-  if (sortKey === 'calories') {
-    return exercise.caloriesKcal;
-  }
-
-  if (sortKey === 'distance') {
-    return exercise.distanceKm;
-  }
-
-  return exercise.steps;
-}
-
-function formatDateTime(value?: string) {
-  if (!value) {
-    return '--';
-  }
-
-  const date = new Date(value);
-
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-
-  return date.toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-}
-
-function formatMinutes(value: number | null) {
-  return value === null ? '--' : `${value} min`;
-}
-
-function formatOptionalNumber(value: number | null) {
-  return value === null ? '--' : Math.round(value).toLocaleString();
-}
-
-function formatOptionalDistance(value: number | null) {
-  return value === null ? '--' : value.toLocaleString(undefined, { maximumFractionDigits: 2 });
-}
+const RADIUS = 12;
 
 const styles = StyleSheet.create({
-  screen: {
-    flex: 1,
-  },
-  scrollView: {
-    flex: 1,
-  },
   scrollContent: {
     alignItems: 'center',
     paddingHorizontal: Spacing.three,
-    paddingBottom: Spacing.five,
+    paddingBottom: Spacing.six,
+    paddingTop: Spacing.four,
   },
-  safeArea: {
+  container: {
     width: '100%',
     maxWidth: MaxContentWidth,
-    gap: Spacing.three,
+    gap: Spacing.four,
   },
-  header: {
-    paddingTop: Spacing.three,
+  headerBlock: {
+    gap: Spacing.half,
+  },
+  headerTopRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     gap: Spacing.three,
   },
-  titleGroup: {
-    flexShrink: 1,
-  },
-  eyebrow: {
+  dateLabel: {
     textTransform: 'uppercase',
-    letterSpacing: 0,
+    letterSpacing: 0.5,
   },
-  title: {
-    fontSize: 42,
-    lineHeight: 48,
-  },
-  statusPill: {
-    minHeight: 34,
+  headerButtons: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: Spacing.three,
-  },
-  statusDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
-  panel: {
-    borderRadius: 8,
-    padding: Spacing.three,
     gap: Spacing.three,
   },
-  controlsHeader: {
+  segments: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    gap: Spacing.three,
+    borderRadius: 9,
+    borderCurve: 'continuous',
+    padding: 2,
   },
-  controlColumns: {
-    gap: Spacing.three,
-  },
-  controlGroup: {
-    gap: Spacing.two,
-  },
-  chipRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.two,
-  },
-  chip: {
-    minHeight: 36,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderRadius: 8,
-    borderWidth: 1,
-    paddingHorizontal: Spacing.three,
-  },
-  activeChip: {
-    borderColor: '#1A73E8',
-    backgroundColor: '#1A73E8',
-  },
-  inactiveChip: {
-    borderColor: '#9AA0A6',
-    backgroundColor: 'transparent',
-  },
-  activeChipText: {
-    color: '#FFFFFF',
-  },
-  searchInput: {
-    minHeight: 44,
-    borderRadius: 8,
-    borderWidth: 1,
-    paddingHorizontal: Spacing.three,
-    fontSize: 16,
-    lineHeight: 22,
-    fontWeight: 500,
-  },
-  connectionHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    gap: Spacing.three,
-  },
-  connectionText: {
+  segment: {
     flex: 1,
-    gap: Spacing.one,
-  },
-  panelTitle: {
-    fontSize: 22,
-    lineHeight: 28,
-  },
-  configGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.two,
-  },
-  configItem: {
-    minWidth: 150,
-    flex: 1,
-    gap: Spacing.one,
-  },
-  configLabel: {
-    textTransform: 'uppercase',
-  },
-  configValue: {
-    flexWrap: 'wrap',
-  },
-  button: {
-    minHeight: 40,
-    minWidth: 94,
-    justifyContent: 'center',
     alignItems: 'center',
-    borderRadius: 8,
+    paddingVertical: Spacing.one + Spacing.half,
+    borderRadius: 7,
+    borderCurve: 'continuous',
+  },
+  ringsCard: {
+    borderRadius: RADIUS,
+    borderCurve: 'continuous',
+    paddingVertical: Spacing.four,
     paddingHorizontal: Spacing.three,
   },
-  primaryButton: {
-    backgroundColor: '#1A73E8',
-  },
-  primaryButtonText: {
-    color: '#FFFFFF',
-  },
-  ghostButton: {
-    borderWidth: 1,
-    borderColor: '#9AA0A6',
-  },
-  disabledButton: {
-    opacity: 0.45,
-  },
-  pressed: {
-    opacity: 0.72,
-  },
-  errorBanner: {
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#DB4437',
-    backgroundColor: 'rgba(219, 68, 55, 0.12)',
-    padding: Spacing.three,
-    gap: Spacing.one,
-  },
-  errorTitle: {
-    color: '#DB4437',
-  },
-  errorText: {
-    color: '#DB4437',
+  cardRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: Spacing.three,
   },
   sectionHeader: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'baseline',
     justifyContent: 'space-between',
     gap: Spacing.three,
-    marginTop: Spacing.two,
-  },
-  sectionTitle: {
-    fontSize: 26,
-    lineHeight: 32,
-  },
-  loadingPanel: {
-    borderRadius: 8,
-    padding: Spacing.three,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
   },
   metricGrid: {
     flexDirection: 'row',
@@ -1011,85 +683,72 @@ const styles = StyleSheet.create({
     gap: Spacing.three,
   },
   metricCard: {
-    borderRadius: 8,
+    borderRadius: RADIUS,
+    borderCurve: 'continuous',
     padding: Spacing.three,
-    minWidth: 150,
+    minWidth: 140,
     flexGrow: 1,
-    flexBasis: '30%',
-    gap: Spacing.two,
-  },
-  metricTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: Spacing.two,
-  },
-  metricStatus: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
+    flexBasis: '40%',
+    gap: Spacing.one,
   },
   metricValueRow: {
     flexDirection: 'row',
-    alignItems: 'flex-end',
-    gap: Spacing.two,
+    alignItems: 'baseline',
+    gap: Spacing.one,
   },
-  metricValue: {
-    fontSize: 32,
-    lineHeight: 36,
-    fontWeight: 700,
-  },
-  twoColumn: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.three,
-  },
-  panelHeadingRow: {
-    flexDirection: 'row',
+  actionButton: {
+    minHeight: 50,
+    paddingHorizontal: Spacing.five,
+    borderRadius: 25,
+    borderCurve: 'continuous',
+    justifyContent: 'center',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: Spacing.three,
   },
-  list: {
-    gap: Spacing.two,
+  disabled: {
+    opacity: 0.4,
   },
-  listItem: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    gap: Spacing.three,
-    paddingVertical: Spacing.two,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: '#9AA0A6',
+  pressed: {
+    opacity: 0.7,
   },
-  listItemMain: {
-    flex: 1,
-    gap: Spacing.one,
-  },
-  exerciseStats: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'flex-end',
-    gap: Spacing.one,
-    maxWidth: 220,
-  },
-  exerciseStat: {
-    minWidth: 62,
-    borderRadius: 8,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#9AA0A6',
-    paddingHorizontal: Spacing.two,
-    paddingVertical: Spacing.one,
+  errorBanner: {
+    alignSelf: 'stretch',
+    borderRadius: 10,
+    borderCurve: 'continuous',
+    backgroundColor: 'rgba(255, 59, 48, 0.1)',
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two + Spacing.half,
     gap: Spacing.half,
   },
-  exerciseStatValue: {
-    fontVariant: ['tabular-nums'],
-  },
-  sleepGrid: {
+  loadingRow: {
     flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.two,
+    paddingVertical: Spacing.two,
+  },
+  debugToggle: {
+    paddingVertical: Spacing.one,
+    alignSelf: 'center',
+  },
+  debugPanel: {
+    borderRadius: RADIUS,
+    borderCurve: 'continuous',
+    padding: Spacing.three,
     gap: Spacing.three,
   },
-  emptyText: {
-    paddingVertical: Spacing.two,
+  configItem: {
+    gap: Spacing.half,
+  },
+  signInScreen: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  signInContent: {
+    width: '100%',
+    maxWidth: MaxContentWidth,
+    alignItems: 'center',
+    paddingHorizontal: Spacing.four,
+    gap: Spacing.four,
   },
 });
