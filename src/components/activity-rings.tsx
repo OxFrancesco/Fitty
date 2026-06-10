@@ -1,31 +1,10 @@
-import { useEffect } from 'react';
 import { StyleSheet, View } from 'react-native';
-import Animated, {
-  Easing,
-  useAnimatedProps,
-  useSharedValue,
-  withDelay,
-  withTiming,
-} from 'react-native-reanimated';
-import Svg, { Circle } from 'react-native-svg';
 
+import { RingsGraphic } from '@/components/rings-graphic';
+import { type RingProgress } from '@/components/rings-geometry';
 import { ThemedText } from '@/components/themed-text';
 import { RingColors, RingGoals, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
-
-const AnimatedCircle = Animated.createAnimatedComponent(Circle);
-
-// ─── Geometry ──────────────────────────────────────────────────────────────────
-
-const SIZE = 168;
-const STROKE = 14;
-const GAP = 4;
-const CENTER = SIZE / 2;
-const RADII = [
-  (SIZE - STROKE) / 2,
-  (SIZE - STROKE) / 2 - (STROKE + GAP),
-  (SIZE - STROKE) / 2 - 2 * (STROKE + GAP),
-] as const;
 
 type RingDef = {
   key: keyof typeof RingColors;
@@ -39,63 +18,6 @@ const RINGS: RingDef[] = [
   { key: 'calories', label: 'Calories', goal: RingGoals.calories, color: RingColors.calories },
   { key: 'minutes', label: 'Minutes', goal: RingGoals.minutes, color: RingColors.minutes },
 ];
-
-// ─── Animated SVG ring ─────────────────────────────────────────────────────────
-
-function ProgressRing({
-  radius,
-  color,
-  targetProgress,
-  delay,
-}: {
-  radius: number;
-  color: string;
-  targetProgress: number;
-  delay: number;
-}) {
-  const circumference = 2 * Math.PI * radius;
-  const progress = useSharedValue(0);
-
-  useEffect(() => {
-    progress.value = withDelay(
-      delay,
-      withTiming(targetProgress, { duration: 1100, easing: Easing.out(Easing.cubic) })
-    );
-  }, [targetProgress, delay, progress]);
-
-  const animatedProps = useAnimatedProps(() => ({
-    strokeDashoffset: circumference * (1 - progress.value),
-  }));
-
-  return (
-    <>
-      {/* Track */}
-      <Circle
-        cx={CENTER}
-        cy={CENTER}
-        r={radius}
-        stroke={color + '26'}
-        strokeWidth={STROKE}
-        fill="none"
-      />
-      {/* Progress arc, starting at 12 o'clock */}
-      <AnimatedCircle
-        cx={CENTER}
-        cy={CENTER}
-        r={radius}
-        stroke={color}
-        strokeWidth={STROKE}
-        strokeLinecap="round"
-        strokeDasharray={`${circumference}`}
-        animatedProps={animatedProps}
-        fill="none"
-        transform={`rotate(-90 ${CENTER} ${CENTER})`}
-      />
-    </>
-  );
-}
-
-// ─── Main export ───────────────────────────────────────────────────────────────
 
 type RingData = {
   steps: number | null;
@@ -112,24 +34,20 @@ export function ActivityRings({ data }: { data: RingData }) {
     minutes: data.minutes,
   };
 
+  const rings: RingProgress[] = RINGS.map((ring, i) => {
+    const value = values[ring.key];
+
+    return {
+      key: ring.key,
+      color: ring.color,
+      progress: value !== null ? Math.min(value / ring.goal, 1) : 0,
+      delay: i * 150,
+    };
+  });
+
   return (
     <View style={styles.row}>
-      <Svg width={SIZE} height={SIZE}>
-        {RINGS.map((ring, i) => {
-          const value = values[ring.key];
-          const fraction = value !== null ? Math.min(value / ring.goal, 1) : 0;
-
-          return (
-            <ProgressRing
-              key={ring.key}
-              radius={RADII[i]}
-              color={ring.color}
-              targetProgress={fraction}
-              delay={i * 150}
-            />
-          );
-        })}
-      </Svg>
+      <RingsGraphic rings={rings} />
 
       {/* Values beside the rings, Apple Fitness style */}
       <View style={styles.legend}>
