@@ -11,13 +11,16 @@ export function OPTIONS() {
   return new Response(null, { headers: corsHeaders });
 }
 
-export function GET() {
+export function GET(request: Request) {
+  const requestUrl = new URL(request.url);
+  const isWeb = requestUrl.searchParams.get('platform') === 'web';
+
   return Response.json(
     {
       clientId: process.env.GOOGLE_CLIENT_ID ?? '',
       hasClientSecret: Boolean(process.env.GOOGLE_CLIENT_SECRET),
-      redirectUri: getGoogleCallbackUri(),
-      appReturnUri: getGoogleAppReturnUri(),
+      redirectUri: isWeb ? `${requestUrl.origin}/api/google/callback` : getGoogleCallbackUri(),
+      appReturnUri: isWeb ? requestUrl.origin : getGoogleAppReturnUri(),
       scopes: GOOGLE_HEALTH_SCOPES,
     },
     { headers: corsHeaders }
