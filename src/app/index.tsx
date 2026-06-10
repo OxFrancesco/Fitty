@@ -19,6 +19,8 @@ import { ErrorRed, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { fetchApiJson, getApiBaseUrl } from '@/lib/api-base';
 import { DEBUG_ENABLED } from '@/lib/debug';
+import { ensureFreshToken } from '@/lib/google-auth';
+import { clearStoredToken, loadStoredToken, saveStoredToken } from '@/lib/token-store';
 import {
   fetchGoogleHealthSnapshot,
   formatMetricValue,
@@ -76,6 +78,7 @@ export default function HomeScreen() {
   const [error, setError] = useState<string | null>(null);
   const [rangeDays, setRangeDays] = useState<DashboardRangeDays>(1);
   const [showDebug, setShowDebug] = useState(false);
+  const [restoring, setRestoring] = useState(true);
 
   useEffect(() => {
     let ignore = false;
@@ -114,6 +117,48 @@ export default function HomeScreen() {
       setHealthState('error');
     }
   }, []);
+
+  // Restore a persisted session so sign-in survives app restarts.
+  useEffect(() => {
+    let ignore = false;
+
+    async function restoreSession() {
+      try {
+        const stored = await loadStoredToken();
+
+        if (!stored || ignore) {
+          return;
+        }
+
+        const fresh = await ensureFreshToken(stored);
+
+        if (ignore) {
+          return;
+        }
+
+        if (fresh !== stored) {
+          await saveStoredToken(fresh);
+        }
+
+        setToken(fresh);
+        setAuthState('loaded');
+        loadHealthData(fresh.accessToken, 1);
+      } catch {
+        // Stored session can no longer be refreshed — require a new sign-in.
+        await clearStoredToken().catch(() => undefined);
+      } finally {
+        if (!ignore) {
+          setRestoring(false);
+        }
+      }
+    }
+
+    restoreSession();
+
+    return () => {
+      ignore = true;
+    };
+  }, [loadHealthData]);
 
   const startGoogleSignIn = useCallback(async () => {
     if (!config?.clientId || !config.hasClientSecret || !config.redirectUri || !config.appReturnUri) {
@@ -154,6 +199,7 @@ export default function HomeScreen() {
       );
       setToken(nextToken);
       setAuthState('loaded');
+      await saveStoredToken(nextToken).catch(() => undefined);
       await loadHealthData(nextToken.accessToken, rangeDays);
     } catch (signInError) {
       setError(signInError instanceof Error ? signInError.message : String(signInError));
@@ -161,24 +207,52 @@ export default function HomeScreen() {
     }
   }, [config, loadHealthData, rangeDays, token]);
 
+  // Refreshes the access token when it is about to expire, then loads data.
+  const loadWithFreshToken = useCallback(
+    async (days: DashboardRangeDays) => {
+      if (!token) {
+        return;
+      }
+
+      let current = token;
+
+      try {
+        current = await ensureFreshToken(token);
+      } catch (refreshError) {
+        // Refresh token revoked or expired — force a new sign-in.
+        await clearStoredToken().catch(() => undefined);
+        setToken(null);
+        setSnapshot(null);
+        setAuthState('idle');
+        setHealthState('idle');
+        setError(refreshError instanceof Error ? refreshError.message : String(refreshError));
+        return;
+      }
+
+      if (current !== token) {
+        setToken(current);
+        saveStoredToken(current).catch(() => undefined);
+      }
+
+      loadHealthData(current.accessToken, days);
+    },
+    [loadHealthData, token]
+  );
+
   const refreshHealthData = useCallback(() => {
-    if (token?.accessToken) {
-      loadHealthData(token.accessToken, rangeDays);
-    }
-  }, [loadHealthData, rangeDays, token?.accessToken]);
+    loadWithFreshToken(rangeDays);
+  }, [loadWithFreshToken, rangeDays]);
 
   const updateRangeDays = useCallback(
     (days: DashboardRangeDays) => {
       setRangeDays(days);
-
-      if (token?.accessToken) {
-        loadHealthData(token.accessToken, days);
-      }
+      loadWithFreshToken(days);
     },
-    [loadHealthData, token?.accessToken]
+    [loadWithFreshToken]
   );
 
   const signOut = useCallback(() => {
+    clearStoredToken().catch(() => undefined);
     setToken(null);
     setSnapshot(null);
     setError(null);
@@ -242,6 +316,15 @@ export default function HomeScreen() {
 
   // ── Auth gate: sign-in screen when not authenticated ──
   if (!token) {
+    // Avoid flashing the sign-in screen while the stored session restores.
+    if (restoring) {
+      return (
+        <View style={[styles.signInScreen, { backgroundColor: theme.background }]}>
+          <ActivityIndicator color={theme.textSecondary} size="large" />
+        </View>
+      );
+    }
+
     return (
       <View style={[styles.signInScreen, { backgroundColor: theme.background }]}>
         <View style={styles.signInContent}>

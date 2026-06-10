@@ -114,6 +114,48 @@ export async function exchangeGoogleCode({
     accessToken: data.access_token,
     expiresIn: data.expires_in,
     idToken: data.id_token,
+    refreshToken: data.refresh_token,
+    scope: data.scope,
+    tokenType: data.token_type,
+    issuedAt: Math.floor(Date.now() / 1000),
+  } satisfies GoogleTokenResponse;
+}
+
+export async function refreshGoogleAccessToken(refreshToken: string) {
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+
+  if (!clientId || !clientSecret) {
+    throw new Error('Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET in .env.local');
+  }
+
+  const form = new URLSearchParams({
+    client_id: clientId,
+    client_secret: clientSecret,
+    refresh_token: refreshToken,
+    grant_type: 'refresh_token',
+  });
+
+  const googleResponse = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: form.toString(),
+  });
+  const text = await googleResponse.text();
+  const data = text ? JSON.parse(text) : {};
+
+  if (!googleResponse.ok) {
+    throw new Error(data.error_description ?? data.error ?? 'Google token refresh failed');
+  }
+
+  return {
+    accessToken: data.access_token,
+    expiresIn: data.expires_in,
+    idToken: data.id_token,
+    // Google only returns a new refresh token occasionally; keep the old one.
+    refreshToken: data.refresh_token ?? refreshToken,
     scope: data.scope,
     tokenType: data.token_type,
     issuedAt: Math.floor(Date.now() / 1000),
