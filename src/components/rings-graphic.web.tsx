@@ -8,14 +8,24 @@ import Animated, {
 } from 'react-native-reanimated';
 import Svg, { Path } from 'react-native-svg';
 
-import { makeHeartGeometry, type RingProgress, SIZE, STROKE } from './rings-geometry';
+import { lighten, makeHeartGeometry, type RingProgress, SIZE, STROKE } from './rings-geometry';
 
 /**
  * SVG fallback for web — the Skia implementation would require shipping
  * CanvasKit (~3 MB of WASM), so web keeps the flat stroke rendering.
+ * Past 100% the completed lap stays underneath and the current lap
+ * continues on top in a brighter tint.
  */
 
 const AnimatedPath = Animated.createAnimatedComponent(Path);
+
+/** How far the overlap lap color shifts toward white */
+const HEAD_TINT = 0.32;
+
+function lapFraction(p: number) {
+  'worklet';
+  return p >= 1 ? p - Math.floor(p) : Math.min(Math.max(p, 0), 1);
+}
 
 function ProgressRing({ index, ring }: { index: number; ring: RingProgress }) {
   const { points, perimeter } = useMemo(() => makeHeartGeometry(index), [index]);
@@ -27,6 +37,7 @@ function ProgressRing({ index, ring }: { index: number; ring: RingProgress }) {
     [points]
   );
   const progress = useSharedValue(0);
+  const headTint = lighten(ring.color, HEAD_TINT);
 
   useEffect(() => {
     progress.value = withDelay(
@@ -35,8 +46,18 @@ function ProgressRing({ index, ring }: { index: number; ring: RingProgress }) {
     );
   }, [ring.progress, ring.delay, progress]);
 
-  const animatedProps = useAnimatedProps(() => ({
-    strokeDashoffset: perimeter * (1 - progress.value),
+  const fullLapProps = useAnimatedProps(() => ({
+    opacity: progress.value >= 1 ? 1 : 0,
+  }));
+
+  const firstLapProps = useAnimatedProps(() => ({
+    strokeDashoffset: perimeter * (1 - lapFraction(progress.value)),
+    opacity: progress.value < 1 ? 1 : 0,
+  }));
+
+  const overlapLapProps = useAnimatedProps(() => ({
+    strokeDashoffset: perimeter * (1 - lapFraction(progress.value)),
+    opacity: progress.value >= 1 ? 1 : 0,
   }));
 
   return (
@@ -49,7 +70,16 @@ function ProgressRing({ index, ring }: { index: number; ring: RingProgress }) {
         strokeLinejoin="round"
         fill="none"
       />
-      {/* Progress sweep, starting at the top notch */}
+      {/* Completed lap stays underneath once the goal is passed */}
+      <AnimatedPath
+        d={d}
+        stroke={ring.color}
+        strokeWidth={STROKE}
+        strokeLinejoin="round"
+        animatedProps={fullLapProps}
+        fill="none"
+      />
+      {/* First lap: progress sweep, starting at the top notch */}
       <AnimatedPath
         d={d}
         stroke={ring.color}
@@ -57,7 +87,18 @@ function ProgressRing({ index, ring }: { index: number; ring: RingProgress }) {
         strokeLinecap="round"
         strokeLinejoin="round"
         strokeDasharray={`${perimeter}`}
-        animatedProps={animatedProps}
+        animatedProps={firstLapProps}
+        fill="none"
+      />
+      {/* Overlap lap rides on top in a brighter tint */}
+      <AnimatedPath
+        d={d}
+        stroke={headTint}
+        strokeWidth={STROKE}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeDasharray={`${perimeter}`}
+        animatedProps={overlapLapProps}
         fill="none"
       />
     </>

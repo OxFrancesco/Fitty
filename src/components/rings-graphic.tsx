@@ -31,10 +31,14 @@ import {
  * Skia activity hearts with a slight 3D treatment:
  * - a sweep gradient brightens each loop toward its head (tube lighting)
  * - the head cap casts a soft shadow onto the track beneath it
+ * - past 100% the loop wraps: a completed lap stays underneath and the
+ *   current lap rides on top, brighter, with a dark blurred underside
  */
 
 /** How far the loop color shifts toward white at full progress */
 const HEAD_TINT = 0.32;
+/** Second-lap end tint — brighter still, so the overlap reads as raised */
+const LAP_TINT = 0.55;
 /** Tip shadow is nudged ahead of the head, along the direction of travel */
 const SHADOW_LEAD = 3;
 
@@ -51,9 +55,16 @@ function sampleLoop(arr: { x: number; y: number }[], f: number) {
   return { x: a.x + (b.x - a.x) * frac, y: a.y + (b.y - a.y) * frac };
 }
 
+/** Fraction of the current lap (0..1) for a possibly multi-lap progress. */
+function lapFraction(p: number) {
+  'worklet';
+  return p >= 1 ? p - Math.floor(p) : Math.min(Math.max(p, 0), 1);
+}
+
 function Ring({ index, ring }: { index: number; ring: RingProgress }) {
   const progress = useSharedValue(0);
   const headTint = lighten(ring.color, HEAD_TINT);
+  const lapTint = lighten(ring.color, LAP_TINT);
   const { points, tangents } = useMemo(() => makeHeartGeometry(index), [index]);
 
   useEffect(() => {
@@ -70,31 +81,37 @@ function Ring({ index, ring }: { index: number; ring: RingProgress }) {
     return path;
   }, [points]);
 
-  // This heart's band — keeps the tip shadow from bleeding into neighbors.
+  // This heart's band — keeps shadows from bleeding into neighbors.
   const band = useMemo(() => {
     const outline = basePath.copy();
     return outline.stroke({ width: STROKE }) ? outline : basePath;
   }, [basePath]);
 
+  // Arc of the lap currently being drawn (wraps past 100%).
   const arcPath = useDerivedValue(() => {
-    const t = Math.min(Math.max(progress.value, 0.0001), 1);
+    const t = Math.min(Math.max(lapFraction(progress.value), 0.0001), 1);
     const path = basePath.copy();
     return path.trim(0, t, false) ?? path;
   });
 
-  const headPos = useDerivedValue(() => sampleLoop(points, progress.value));
+  const headPos = useDerivedValue(() => sampleLoop(points, lapFraction(progress.value)));
 
   const shadowPos = useDerivedValue(() => {
-    const pos = sampleLoop(points, progress.value);
-    const tan = sampleLoop(tangents, progress.value);
+    const f = lapFraction(progress.value);
+    const pos = sampleLoop(points, f);
+    const tan = sampleLoop(tangents, f);
     return { x: pos.x + SHADOW_LEAD * tan.x, y: pos.y + SHADOW_LEAD * tan.y };
   });
 
   const headColor = useDerivedValue(() =>
-    interpolateColor(progress.value, [0, 1], [ring.color, headTint])
+    interpolateColor(Math.min(progress.value, 2), [0, 1, 2], [ring.color, headTint, lapTint])
   );
 
-  const arcOpacity = useDerivedValue(() => (progress.value > 0.001 ? 1 : 0));
+  const firstLapOpacity = useDerivedValue(() =>
+    progress.value > 0.001 && progress.value < 1 ? 1 : 0
+  );
+  const fullLapOpacity = useDerivedValue(() => (progress.value >= 1 ? 1 : 0));
+  const headOpacity = useDerivedValue(() => (progress.value > 0.001 ? 1 : 0));
 
   return (
     <>
@@ -107,12 +124,39 @@ function Ring({ index, ring }: { index: number; ring: RingProgress }) {
         color={ring.color + '26'}
       />
 
-      <Group opacity={arcOpacity}>
-        {/* Progress sweep, brightening toward the head */}
+      {/* Completed lap stays underneath once the goal is passed */}
+      <Group opacity={fullLapOpacity}>
+        <Path path={basePath} style="stroke" strokeWidth={STROKE} strokeJoin="round">
+          <SweepGradient c={vec(CENTER, CENTER)} colors={[ring.color, headTint]} />
+        </Path>
+      </Group>
+
+      {/* First lap: progress sweep brightening toward the head */}
+      <Group opacity={firstLapOpacity}>
         <Path path={arcPath} style="stroke" strokeWidth={STROKE} strokeCap="round" strokeJoin="round">
           <SweepGradient c={vec(CENTER, CENTER)} colors={[ring.color, headTint]} />
         </Path>
+      </Group>
 
+      {/* Overlap lap: darkens the lap below, then rides on top, brighter */}
+      <Group opacity={fullLapOpacity} clip={band}>
+        <Path
+          path={arcPath}
+          style="stroke"
+          strokeWidth={STROKE}
+          strokeCap="round"
+          strokeJoin="round"
+          color="black"
+          opacity={0.28}
+        >
+          <BlurMask blur={5} style="normal" />
+        </Path>
+        <Path path={arcPath} style="stroke" strokeWidth={STROKE} strokeCap="round" strokeJoin="round">
+          <SweepGradient c={vec(CENTER, CENTER)} colors={[headTint, lapTint]} />
+        </Path>
+      </Group>
+
+      <Group opacity={headOpacity}>
         {/* Soft shadow cast by the head onto whatever sits beneath it */}
         <Group clip={band}>
           <Circle c={shadowPos} r={STROKE / 2} color="black" opacity={0.3}>

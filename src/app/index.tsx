@@ -2,11 +2,12 @@ import * as ExpoCrypto from 'expo-crypto';
 import * as WebBrowser from 'expo-web-browser';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
-import Animated, { FadeInDown } from 'react-native-reanimated';
+import Animated, { FadeInDown, FadeOut, LinearTransition } from 'react-native-reanimated';
 
-import { ActivityRings } from '@/components/activity-rings';
-import { HealthCard } from '@/components/health-card';
+import { ActivityRings, type RingSlot } from '@/components/activity-rings';
+import { CardEditor } from '@/components/card-editor';
 import { LoadingDots, SkeletonCard } from '@/components/loading';
+import { MetricCard } from '@/components/metric-card';
 import { SleepCard } from '@/components/sleep-card';
 import { ThemedText } from '@/components/themed-text';
 import { ErrorRed, MaxContentWidth, Spacing } from '@/constants/theme';
@@ -20,12 +21,16 @@ import {
   isSnapshotFresh,
   setCachedSnapshot,
 } from '@/lib/health-cache';
+import { loadDashboardPrefs, saveDashboardPrefs } from '@/lib/dashboard-prefs';
+import { defaultPrefs, type DashboardPrefs } from '@/lib/dashboard-prefs-core';
+import { getDefaultGoal, getMetricDef, SLEEP_CARD_ID } from '@/lib/metric-catalog';
 import { clearStoredToken, loadStoredToken, saveStoredToken } from '@/lib/token-store';
 import {
   fetchGoogleHealthSnapshot,
-  formatMetricValue,
+  fetchHealthMetrics,
   GOOGLE_HEALTH_SCOPES,
   GOOGLE_OAUTH_DISCOVERY,
+  mergeSnapshotMetrics,
   type GoogleHealthConfig,
   type GoogleTokenResponse,
   type HealthMetric,
@@ -77,6 +82,9 @@ export default function HomeScreen() {
   const [healthState, setHealthState] = useState<LoadState>('idle');
   const [error, setError] = useState<string | null>(null);
   const [rangeDays, setRangeDays] = useState<DashboardRangeDays>(1);
+  const [prefs, setPrefs] = useState<DashboardPrefs>(defaultPrefs);
+  const [cardEditorOpen, setCardEditorOpen] = useState(false);
+  const [ringEditorSlot, setRingEditorSlot] = useState<number | null>(null);
   const [showDebug, setShowDebug] = useState(false);
   const [restoring, setRestoring] = useState(true);
   // True while revalidating in the background — cached data stays on screen.
@@ -84,6 +92,30 @@ export default function HomeScreen() {
   // Guards against an older fetch overwriting a newer range's data.
   const requestIdRef = useRef(0);
   const snapshotRef = useRef<HealthSnapshot | null>(null);
+
+  // Latest prefs for callbacks that must not capture stale state.
+  const prefsRef = useRef(prefs);
+  useEffect(() => {
+    prefsRef.current = prefs;
+  }, [prefs]);
+
+  // Metrics the dashboard needs: every ring plus every visible metric card.
+  const neededIds = useMemo(() => {
+    const ids = new Set<string>();
+
+    for (const id of [...prefs.rings, ...prefs.cards]) {
+      if (id !== SLEEP_CARD_ID && getMetricDef(id)) {
+        ids.add(id);
+      }
+    }
+
+    return [...ids];
+  }, [prefs.rings, prefs.cards]);
+
+  const neededIdsRef = useRef(neededIds);
+  useEffect(() => {
+    neededIdsRef.current = neededIds;
+  }, [neededIds]);
 
   const applySnapshot = useCallback((next: HealthSnapshot | null) => {
     snapshotRef.current = next;
@@ -114,6 +146,58 @@ export default function HomeScreen() {
     };
   }, []);
 
+  // Restore persisted dashboard customization (rings, goals, cards).
+  useEffect(() => {
+    let ignore = false;
+
+    loadDashboardPrefs()
+      .then((stored) => {
+        if (!ignore) {
+          setPrefs(stored);
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      ignore = true;
+    };
+  }, []);
+
+  const persistPrefs = useCallback((next: DashboardPrefs) => {
+    setPrefs(next);
+    saveDashboardPrefs(next).catch(() => undefined);
+  }, []);
+
+  const selectRingMetric = useCallback(
+    (slot: number, metricId: string) => {
+      const rings = [...prefsRef.current.rings] as DashboardPrefs['rings'];
+      rings[slot] = metricId;
+      persistPrefs({ ...prefsRef.current, rings });
+    },
+    [persistPrefs]
+  );
+
+  const changeRingGoal = useCallback(
+    (metricId: string, goal: number) => {
+      persistPrefs({
+        ...prefsRef.current,
+        goals: { ...prefsRef.current.goals, [metricId]: goal },
+      });
+    },
+    [persistPrefs]
+  );
+
+  const toggleCard = useCallback(
+    (id: string) => {
+      const current = prefsRef.current;
+      const cards = current.cards.includes(id)
+        ? current.cards.filter((card) => card !== id)
+        : [...current.cards, id];
+      persistPrefs({ ...current, cards });
+    },
+    [persistPrefs]
+  );
+
   const loadHealthData = useCallback(
     async (accessToken: string, days: DashboardRangeDays, options?: { force?: boolean }) => {
       const requestId = ++requestIdRef.current;
@@ -126,8 +210,39 @@ export default function HomeScreen() {
         setHealthState('loaded');
 
         if (!options?.force && isSnapshotFresh(cached)) {
-          // Cancels any superseded in-flight refresh's indicator too.
-          setRefreshing(false);
+          // A fresh cache may still miss metrics added to rings/cards since.
+          const missing = neededIdsRef.current.filter(
+            (id) => !cached.snapshot.metrics.some((metric) => metric.id === id)
+          );
+
+          if (!missing.length) {
+            // Cancels any superseded in-flight refresh's indicator too.
+            setRefreshing(false);
+            return;
+          }
+
+          setRefreshing(true);
+
+          try {
+            const { metrics, raw } = await fetchHealthMetrics(accessToken, missing, days);
+
+            if (requestIdRef.current === requestId) {
+              const merged = mergeSnapshotMetrics(
+                snapshotRef.current ?? cached.snapshot,
+                metrics,
+                raw
+              );
+              setCachedSnapshot(days, merged);
+              applySnapshot(merged);
+            }
+          } catch {
+            // Top-up failed — the cached snapshot stays on screen.
+          } finally {
+            if (requestIdRef.current === requestId) {
+              setRefreshing(false);
+            }
+          }
+
           return;
         }
       }
@@ -142,7 +257,10 @@ export default function HomeScreen() {
       }
 
       try {
-        const healthSnapshot = await fetchGoogleHealthSnapshot(accessToken, { days });
+        const healthSnapshot = await fetchGoogleHealthSnapshot(accessToken, {
+          days,
+          metricIds: neededIdsRef.current,
+        });
         setCachedSnapshot(days, healthSnapshot);
 
         if (requestIdRef.current === requestId) {
@@ -294,6 +412,54 @@ export default function HomeScreen() {
     loadWithFreshToken(rangeDays, { force: true });
   }, [loadWithFreshToken, rangeDays]);
 
+  // When customization adds a metric we have not fetched yet, top up the
+  // current snapshot in the background instead of reloading everything.
+  useEffect(() => {
+    const current = snapshotRef.current;
+
+    if (!token || !current) {
+      return;
+    }
+
+    const missing = neededIds.filter(
+      (id) => !current.metrics.some((metric) => metric.id === id)
+    );
+
+    if (!missing.length) {
+      return;
+    }
+
+    let cancelled = false;
+
+    (async () => {
+      setRefreshing(true);
+
+      try {
+        const fresh = await ensureFreshToken(token);
+        const { metrics, raw } = await fetchHealthMetrics(fresh.accessToken, missing, rangeDays);
+        const base = snapshotRef.current;
+
+        if (cancelled || !base) {
+          return;
+        }
+
+        const merged = mergeSnapshotMetrics(base, metrics, raw);
+        setCachedSnapshot(rangeDays, merged);
+        applySnapshot(merged);
+      } catch {
+        // New metrics stay '--' until the next sync.
+      } finally {
+        if (!cancelled) {
+          setRefreshing(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [applySnapshot, neededIds, rangeDays, token]);
+
   const updateRangeDays = useCallback(
     (days: DashboardRangeDays) => {
       setRangeDays(days);
@@ -318,39 +484,23 @@ export default function HomeScreen() {
   // First-ever load — nothing cached yet, so show skeleton cards.
   const initialLoading = healthState === 'loading' && !snapshot;
 
-  // Extract ring data from metrics
   const metricsMap = useMemo(() => {
     const map: Record<string, HealthMetric> = {};
-    for (const m of snapshot?.metrics ?? placeholderMetrics) {
+    for (const m of snapshot?.metrics ?? []) {
       map[m.id] = m;
     }
     return map;
   }, [snapshot?.metrics]);
 
-  const ringData = useMemo(
-    () => ({
-      steps: metricsMap['steps']?.value ?? null,
-      calories: metricsMap['active-energy-burned']?.value ?? null,
-      minutes: metricsMap['active-minutes']?.value ?? null,
-    }),
-    [metricsMap]
-  );
-
-  // Secondary metrics (not shown in rings or vitals)
-  const secondaryMetrics = useMemo(
+  const ringSlots: RingSlot[] = useMemo(
     () =>
-      (snapshot?.metrics ?? placeholderMetrics).filter(
-        (m) =>
-          !['steps', 'active-energy-burned', 'active-minutes', 'heart-rate', 'floors'].includes(m.id)
-      ),
-    [snapshot?.metrics]
+      prefs.rings.map((id) => ({
+        metricId: id,
+        value: metricsMap[id]?.value ?? null,
+        goal: prefs.goals[id] ?? getDefaultGoal(id),
+      })),
+    [prefs.rings, prefs.goals, metricsMap]
   );
-
-  // Heart rate
-  const heartRate = metricsMap['heart-rate']?.value;
-  const heartRateDisplay = heartRate !== null && heartRate !== undefined
-    ? Math.round(heartRate).toString()
-    : '--';
 
   const userName = useMemo(() => {
     if (token?.idToken) {
@@ -482,51 +632,74 @@ export default function HomeScreen() {
 
         {/* ── Activity rings ── */}
         <Section index={2}>
+          <SectionHeader
+            title="Activity"
+            trailing={
+              <TextButton label="Edit" color={theme.text} onPress={() => setRingEditorSlot(0)} />
+            }
+          />
           <View style={[styles.ringsCard, { backgroundColor: theme.card }]}>
-            <ActivityRings data={ringData} />
+            <ActivityRings
+              slots={ringSlots}
+              editingSlot={ringEditorSlot}
+              onEditSlot={setRingEditorSlot}
+              onSelectMetric={selectRingMetric}
+              onChangeGoal={changeRingGoal}
+            />
           </View>
         </Section>
 
-        {/* ── Vitals ── */}
+        {/* ── Metrics (user-curated cards) ── */}
         <Section index={3}>
-          <SectionHeader title="Vitals" />
-          <View style={styles.cardRow}>
-            {initialLoading ? (
-              <>
-                <SkeletonCard />
-                <SkeletonCard />
-              </>
-            ) : (
-              <>
-                <SleepCard sessions={snapshot?.sleepSessions ?? []} />
-                <HealthCard label="Heart rate" value={heartRateDisplay} unit="bpm" />
-              </>
-            )}
-          </View>
-        </Section>
-
-        {/* ── Measures ── */}
-        {initialLoading ? (
-          <Section index={4}>
-            <SectionHeader title="Measures" />
+          <SectionHeader
+            title="Metrics"
+            trailing={
+              <TextButton label="Edit" color={theme.text} onPress={() => setCardEditorOpen(true)} />
+            }
+          />
+          {initialLoading ? (
             <View style={styles.metricGrid}>
               {[0, 1, 2, 3].map((slot) => (
                 <SkeletonCard key={slot} />
               ))}
             </View>
-          </Section>
-        ) : (
-          secondaryMetrics.length > 0 && (
-            <Section index={4}>
-              <SectionHeader title="Measures" />
-              <View style={styles.metricGrid}>
-                {secondaryMetrics.map((metric) => (
-                  <MetricCard key={metric.id} metric={metric} />
-                ))}
-              </View>
-            </Section>
-          )
-        )}
+          ) : prefs.cards.length === 0 ? (
+            <ThemedText
+              type="small"
+              style={{ color: theme.textSecondary, textAlign: 'center' }}
+            >
+              No cards yet — tap Edit to add some.
+            </ThemedText>
+          ) : (
+            <View style={styles.metricGrid}>
+              {prefs.cards.map((id) => {
+                if (id === SLEEP_CARD_ID) {
+                  return (
+                    <Animated.View
+                      key={id}
+                      entering={FadeInDown.duration(350)}
+                      exiting={FadeOut.duration(200)}
+                      layout={LinearTransition.springify().damping(18)}
+                      style={styles.sleepSlot}
+                    >
+                      <SleepCard sessions={snapshot?.sleepSessions ?? []} />
+                    </Animated.View>
+                  );
+                }
+
+                const def = getMetricDef(id);
+                return def ? <MetricCard key={id} def={def} metric={metricsMap[id]} /> : null;
+              })}
+            </View>
+          )}
+        </Section>
+
+        <CardEditor
+          visible={cardEditorOpen}
+          selected={prefs.cards}
+          onToggle={toggleCard}
+          onClose={() => setCardEditorOpen(false)}
+        />
 
         {/* ── Connection diagnostics (debug builds only) ── */}
         {DEBUG_ENABLED && (
@@ -625,26 +798,6 @@ function TextButton({
   );
 }
 
-function MetricCard({ metric }: { metric: HealthMetric }) {
-  const theme = useTheme();
-
-  return (
-    <View style={[styles.metricCard, { backgroundColor: theme.card }]}>
-      <ThemedText type="caption" style={{ color: theme.textSecondary }}>
-        {metric.label}
-      </ThemedText>
-      <View style={styles.metricValueRow}>
-        <ThemedText type="metric">{formatMetricValue(metric)}</ThemedText>
-        {metric.unit.toLowerCase() !== metric.label.toLowerCase() && (
-          <ThemedText type="small" style={{ color: theme.textSecondary }}>
-            {metric.unit}
-          </ThemedText>
-        )}
-      </View>
-    </View>
-  );
-}
-
 function DebugPanel({
   expanded,
   onToggle,
@@ -696,15 +849,6 @@ function ErrorBanner({ message }: { message: string }) {
 }
 
 // ─── Helpers (unchanged logic) ─────────────────────────────────────────────────
-
-const placeholderMetrics: HealthMetric[] = [
-  { id: 'steps', label: 'Steps', value: null, unit: 'steps', status: 'empty' },
-  { id: 'active-energy-burned', label: 'Active calories', value: null, unit: 'kcal', status: 'empty' },
-  { id: 'total-calories', label: 'Total calories', value: null, unit: 'kcal', status: 'empty' },
-  { id: 'active-minutes', label: 'Active minutes', value: null, unit: 'min', status: 'empty' },
-  { id: 'distance', label: 'Distance', value: null, unit: 'km', status: 'empty' },
-  { id: 'heart-rate', label: 'Avg heart rate', value: null, unit: 'bpm', status: 'empty' },
-];
 
 function decodeIdToken(idToken: string): { name?: string; given_name?: string; email?: string } | null {
   try {
@@ -822,11 +966,6 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.four,
     paddingHorizontal: Spacing.three,
   },
-  cardRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: Spacing.three,
-  },
   sectionHeader: {
     flexDirection: 'row',
     alignItems: 'baseline',
@@ -838,19 +977,10 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: Spacing.three,
   },
-  metricCard: {
-    borderRadius: RADIUS,
-    borderCurve: 'continuous',
-    padding: Spacing.three,
+  sleepSlot: {
     minWidth: 140,
     flexGrow: 1,
     flexBasis: '40%',
-    gap: Spacing.one,
-  },
-  metricValueRow: {
-    flexDirection: 'row',
-    alignItems: 'baseline',
-    gap: Spacing.one,
   },
   actionButton: {
     minHeight: 50,

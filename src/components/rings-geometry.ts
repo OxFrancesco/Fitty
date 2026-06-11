@@ -16,7 +16,7 @@ export const RADII = [
 export type RingProgress = {
   key: string;
   color: string;
-  /** Fraction of the goal, clamped to [0, 1] */
+  /** Fraction of the goal; values above 1 wrap into extra laps */
   progress: number;
   /** Entrance animation delay in ms */
   delay: number;

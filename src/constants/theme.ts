@@ -83,3 +83,6 @@ export const Spacing = {
 
 export const BottomTabInset = Platform.select({ ios: 50, android: 80 }) ?? 0;
 export const MaxContentWidth = 540;
+
+/** Uniform height for all dashboard cards (sleep, metrics, skeletons) */
+export const MetricCardMinHeight = 112;
