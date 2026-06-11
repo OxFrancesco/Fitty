@@ -384,7 +384,7 @@ export default function HomeScreen() {
     return (
       <View style={[styles.signInScreen, { backgroundColor: theme.background }]}>
         <View style={styles.signInContent}>
-          <ThemedText type="hero">Fitty</ThemedText>
+          <ThemedText type="hero">OpenFit</ThemedText>
           <ThemedText type="small" style={{ color: theme.textSecondary }}>
             Connects to Google Fit
           </ThemedText>
