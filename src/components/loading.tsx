@@ -10,7 +10,7 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 
-import { Spacing } from '@/constants/theme';
+import { MetricCardMinHeight, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 
 /**
@@ -127,6 +127,7 @@ const styles = StyleSheet.create({
     borderCurve: 'continuous',
     padding: Spacing.three,
     minWidth: 140,
+    minHeight: MetricCardMinHeight,
     flexGrow: 1,
     flexBasis: '40%',
     gap: Spacing.two,

@@ -9,7 +9,7 @@ import {
 } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
-import { Spacing } from '@/constants/theme';
+import { MetricCardMinHeight, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import type { SleepSummary } from '@/lib/google-health';
 
@@ -34,8 +34,8 @@ export function SleepCard({ sessions }: { sessions: SleepSummary[] }) {
   const current = sessions[page];
 
   return (
-    <View style={styles.wrapper}>
-      <View style={[styles.card, { backgroundColor: theme.card }]}>
+    <View style={[styles.card, { backgroundColor: theme.card }]}>
+      <View style={{ gap: Spacing.one }}>
         <View style={styles.headerRow}>
           <ThemedText type="caption" style={{ color: theme.textSecondary }}>
             Sleep
@@ -105,8 +105,8 @@ export function SleepCard({ sessions }: { sessions: SleepSummary[] }) {
       {current && (
         <ThemedText
           type="caption"
-          style={[styles.label, { color: theme.textSecondary }]}
-          numberOfLines={2}
+          style={{ color: theme.textSecondary }}
+          numberOfLines={1}
         >
           {current.kind === 'nap' ? 'Nap' : 'Night'}
           {current.endTime ? ` · ended ${formatDateTime(current.endTime)}` : ''}
@@ -142,15 +142,14 @@ function formatDateTime(value: string) {
 }
 
 const styles = StyleSheet.create({
-  wrapper: {
+  card: {
     flex: 1,
     minWidth: 140,
-    gap: Spacing.one + Spacing.half,
-  },
-  card: {
+    minHeight: MetricCardMinHeight,
     borderRadius: 12,
     borderCurve: 'continuous',
     padding: Spacing.three,
+    justifyContent: 'space-between',
     gap: Spacing.one,
   },
   headerRow: {

@@ -1,3 +1,13 @@
+import {
+  DEFAULT_CARD_IDS,
+  DEFAULT_RING_IDS,
+  getMetricDef,
+  parseDurationSeconds,
+  SLEEP_CARD_ID,
+  toNumber,
+  type MetricDef,
+} from '@/lib/metric-catalog';
+
 export const GOOGLE_OAUTH_DISCOVERY = {
   authorizationEndpoint: 'https://accounts.google.com/o/oauth2/v2/auth',
   tokenEndpoint: 'https://oauth2.googleapis.com/token',
@@ -85,108 +95,11 @@ export type HealthSnapshot = {
 
 export type HealthSnapshotOptions = {
   days?: number;
+  /** Metric ids to load; defaults to the default rings + cards */
+  metricIds?: string[];
 };
 
 type DataPoint = Record<string, any>;
-
-type RollupConfig = {
-  id: string;
-  field: string;
-  label: string;
-  unit: string;
-  extract: (value: Record<string, any>) => number | null;
-};
-
-const ROLLUP_CONFIGS: RollupConfig[] = [
-  {
-    id: 'steps',
-    field: 'steps',
-    label: 'Steps',
-    unit: 'steps',
-    extract: (value) => toNumber(value.countSum),
-  },
-  {
-    id: 'active-energy-burned',
-    field: 'activeEnergyBurned',
-    label: 'Active calories',
-    unit: 'kcal',
-    extract: (value) => toNumber(value.kcalSum),
-  },
-  {
-    id: 'total-calories',
-    field: 'totalCalories',
-    label: 'Total calories',
-    unit: 'kcal',
-    extract: (value) => toNumber(value.kcalSum),
-  },
-  {
-    id: 'active-minutes',
-    field: 'activeMinutes',
-    label: 'Active minutes',
-    unit: 'min',
-    extract: (value) => {
-      const minutesByLevel = value.activeMinutesRollupByActivityLevel as
-        | { activeMinutesSum?: unknown }[]
-        | undefined;
-
-      return sumValues(minutesByLevel, (item) => toNumber(item.activeMinutesSum));
-    },
-  },
-  {
-    id: 'distance',
-    field: 'distance',
-    label: 'Distance',
-    unit: 'km',
-    extract: (value) => {
-      const millimeters = toNumber(value.millimetersSum);
-      return millimeters === null ? null : millimeters / 1_000_000;
-    },
-  },
-  {
-    id: 'floors',
-    field: 'floors',
-    label: 'Floors',
-    unit: 'floors',
-    extract: (value) => toNumber(value.countSum),
-  },
-  {
-    id: 'heart-rate',
-    field: 'heartRate',
-    label: 'Avg heart rate',
-    unit: 'bpm',
-    extract: (value) => toNumber(value.beatsPerMinuteAvg),
-  },
-];
-
-function toNumber(value: unknown) {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value;
-  }
-
-  if (typeof value === 'string' && value.trim()) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-
-  return null;
-}
-
-function sumValues<T>(values: T[] | undefined, extract: (value: T) => number | null) {
-  if (!values?.length) {
-    return null;
-  }
-
-  return values.reduce((sum, value) => sum + (extract(value) ?? 0), 0);
-}
-
-function parseDurationSeconds(duration: unknown) {
-  if (typeof duration !== 'string') {
-    return null;
-  }
-
-  const match = duration.match(/^(\d+(?:\.\d+)?)s$/);
-  return match ? Number(match[1]) : null;
-}
 
 function toCivilDateTime(date: Date) {
   return {
@@ -258,12 +171,19 @@ function extractGoogleError(data: unknown, status: number) {
   return error?.error?.message ?? error?.message ?? `Google Health API failed with ${status}`;
 }
 
-async function fetchDailyRollup(
-  accessToken: string,
-  config: RollupConfig,
-  start: Date,
-  end: Date
-) {
+/** Combine per-day values; null when no day in the range had data. */
+function aggregateValues(values: (number | null)[], aggregate: MetricDef['aggregate']) {
+  const present = values.filter((value): value is number => value !== null);
+
+  if (!present.length) {
+    return null;
+  }
+
+  const total = present.reduce((sum, value) => sum + value, 0);
+  return aggregate === 'avg' ? total / present.length : total;
+}
+
+async function fetchRollupValue(accessToken: string, def: MetricDef, start: Date, end: Date) {
   const body = {
     range: {
       start: toCivilDateTime(start),
@@ -274,27 +194,123 @@ async function fetchDailyRollup(
 
   const data = await googleHealthFetch<{ rollupDataPoints?: DataPoint[] }>(
     accessToken,
-    `/users/me/dataTypes/${config.id}/dataPoints:dailyRollUp`,
+    `/users/me/dataTypes/${def.id}/dataPoints:dailyRollUp`,
     {
       method: 'POST',
       body: JSON.stringify(body),
     }
   );
 
-  const value = sumValues(data.rollupDataPoints, (point) => {
-    const rollupValue = point[config.field];
-    return rollupValue ? config.extract(rollupValue) : null;
+  const values = (data.rollupDataPoints ?? []).map((point) => {
+    const rollupValue = point[def.field];
+    return rollupValue ? def.extract(rollupValue) : null;
   });
+
+  return { value: aggregateValues(values, def.aggregate), raw: data };
+}
+
+async function fetchDailyValue(accessToken: string, def: MetricDef, start: Date, end: Date) {
+  // List-only daily summaries filter on their civil date field.
+  const snakeId = def.id.replace(/-/g, '_');
+  const filter = `${snakeId}.date >= "${toIsoDate(start)}" AND ${snakeId}.date < "${toIsoDate(end)}"`;
+
+  const data = await googleHealthFetch<{ dataPoints?: DataPoint[] }>(
+    accessToken,
+    `/users/me/dataTypes/${def.id}/dataPoints?page_size=100&filter=${encodeURIComponent(filter)}`
+  );
+
+  const values = (data.dataPoints ?? []).map((point) => {
+    const payload = point[def.field];
+    return payload ? def.extract(payload) : null;
+  });
+
+  return { value: aggregateValues(values, def.aggregate), raw: data };
+}
+
+async function fetchMetric(accessToken: string, def: MetricDef, start: Date, end: Date) {
+  const { value, raw } =
+    def.kind === 'daily'
+      ? await fetchDailyValue(accessToken, def, start, end)
+      : await fetchRollupValue(accessToken, def, start, end);
 
   return {
     metric: {
-      id: config.id,
-      label: config.label,
+      id: def.id,
+      label: def.label,
       value,
-      unit: config.unit,
+      unit: def.unit,
       status: value === null ? 'empty' : 'loaded',
     } satisfies HealthMetric,
-    raw: data,
+    raw,
+  };
+}
+
+function sanitizeMetricIds(ids: string[]) {
+  const seen = new Set<string>();
+  const defs: MetricDef[] = [];
+
+  for (const id of ids) {
+    if (id === SLEEP_CARD_ID || seen.has(id)) {
+      continue;
+    }
+
+    const def = getMetricDef(id);
+
+    if (def) {
+      seen.add(id);
+      defs.push(def);
+    }
+  }
+
+  return defs;
+}
+
+/**
+ * Fetch a set of metrics by id. Used for the initial snapshot and for
+ * incrementally loading metrics the user adds to rings/cards later.
+ */
+export async function fetchHealthMetrics(accessToken: string, metricIds: string[], days: number) {
+  const { start, end } = getRollingWindow(days);
+  const raw: Record<string, unknown> = {};
+
+  const metrics = await Promise.all(
+    sanitizeMetricIds(metricIds).map(async (def): Promise<HealthMetric> => {
+      try {
+        const result = await fetchMetric(accessToken, def, start, end);
+        raw[def.id] = result.raw;
+        return result.metric;
+      } catch (error) {
+        raw[def.id] = { error: String(error instanceof Error ? error.message : error) };
+        return {
+          id: def.id,
+          label: def.label,
+          value: null,
+          unit: def.unit,
+          status: 'error',
+          error: error instanceof Error ? error.message : String(error),
+        } satisfies HealthMetric;
+      }
+    })
+  );
+
+  return { metrics, raw };
+}
+
+/** Merge incrementally fetched metrics into an existing snapshot. */
+export function mergeSnapshotMetrics(
+  snapshot: HealthSnapshot,
+  metrics: HealthMetric[],
+  raw: Record<string, unknown>
+): HealthSnapshot {
+  const updated = new Set(metrics.map((metric) => metric.id));
+
+  return {
+    ...snapshot,
+    metrics: [...snapshot.metrics.filter((metric) => !updated.has(metric.id)), ...metrics],
+    raw: {
+      ...snapshot.raw,
+      rollups: { ...snapshot.raw.rollups, ...raw },
+    },
   };
 }
 
@@ -375,45 +391,28 @@ export async function fetchGoogleHealthSnapshot(
   accessToken: string,
   options: HealthSnapshotOptions = {}
 ): Promise<HealthSnapshot> {
-  const { start, end } = getRollingWindow(options.days ?? 7);
+  const days = options.days ?? 7;
+  const metricIds = options.metricIds ?? [...DEFAULT_RING_IDS, ...DEFAULT_CARD_IDS];
+  const { start, end } = getRollingWindow(days);
   const rangeLabel = formatRangeLabel(start, end);
-  const rollups: Record<string, unknown> = {};
-
-  const metricResults = await Promise.all(
-    ROLLUP_CONFIGS.map(async (config) => {
-      try {
-        const result = await fetchDailyRollup(accessToken, config, start, end);
-        rollups[config.id] = result.raw;
-        return result.metric;
-      } catch (error) {
-        rollups[config.id] = { error: String(error instanceof Error ? error.message : error) };
-        return {
-          id: config.id,
-          label: config.label,
-          value: null,
-          unit: config.unit,
-          status: 'error',
-          error: error instanceof Error ? error.message : String(error),
-        } satisfies HealthMetric;
-      }
-    })
-  );
 
   const exerciseFilter = `exercise.interval.civil_start_time >= "${toIsoDate(start)}" AND exercise.interval.civil_start_time < "${toIsoDate(end)}"`;
   const sleepFilter = `sleep.interval.civil_end_time >= "${toIsoDate(start)}" AND sleep.interval.civil_end_time < "${toIsoDate(end)}"`;
 
-  const [identity, profile, exerciseData, sleepData] = await Promise.all([
-    googleHealthFetch<Record<string, unknown>>(accessToken, '/users/me/identity').catch(() => null),
-    googleHealthFetch<Record<string, unknown>>(accessToken, '/users/me/profile').catch(() => null),
-    googleHealthFetch<{ dataPoints?: DataPoint[] }>(
-      accessToken,
-      `/users/me/dataTypes/exercise/dataPoints?page_size=50&filter=${encodeURIComponent(exerciseFilter)}`
-    ).catch((error) => ({ error: error instanceof Error ? error.message : String(error) })),
-    googleHealthFetch<{ dataPoints?: DataPoint[] }>(
-      accessToken,
-      `/users/me/dataTypes/sleep/dataPoints?page_size=20&filter=${encodeURIComponent(sleepFilter)}`
-    ).catch((error) => ({ error: error instanceof Error ? error.message : String(error) })),
-  ]);
+  const [{ metrics, raw: rollups }, identity, profile, exerciseData, sleepData] =
+    await Promise.all([
+      fetchHealthMetrics(accessToken, metricIds, days),
+      googleHealthFetch<Record<string, unknown>>(accessToken, '/users/me/identity').catch(() => null),
+      googleHealthFetch<Record<string, unknown>>(accessToken, '/users/me/profile').catch(() => null),
+      googleHealthFetch<{ dataPoints?: DataPoint[] }>(
+        accessToken,
+        `/users/me/dataTypes/exercise/dataPoints?page_size=50&filter=${encodeURIComponent(exerciseFilter)}`
+      ).catch((error) => ({ error: error instanceof Error ? error.message : String(error) })),
+      googleHealthFetch<{ dataPoints?: DataPoint[] }>(
+        accessToken,
+        `/users/me/dataTypes/sleep/dataPoints?page_size=20&filter=${encodeURIComponent(sleepFilter)}`
+      ).catch((error) => ({ error: error instanceof Error ? error.message : String(error) })),
+    ]);
 
   const exercisePoints = 'dataPoints' in exerciseData ? exerciseData.dataPoints ?? [] : [];
   const sleepPoints = 'dataPoints' in sleepData ? sleepData.dataPoints ?? [] : [];
@@ -421,7 +420,7 @@ export async function fetchGoogleHealthSnapshot(
   return {
     identity,
     profile,
-    metrics: metricResults,
+    metrics,
     exercises: exercisePoints.map(normalizeExercise),
     sleepSessions: sleepPoints
       .map(normalizeSleep)
@@ -443,13 +442,6 @@ export function formatMetricValue(metric: HealthMetric) {
     return '--';
   }
 
-  if (metric.unit === 'km') {
-    return metric.value.toLocaleString(undefined, { maximumFractionDigits: 2 });
-  }
-
-  if (metric.unit === 'kcal') {
-    return Math.round(metric.value).toLocaleString();
-  }
-
-  return Math.round(metric.value).toLocaleString();
+  const digits = getMetricDef(metric.id)?.fractionDigits ?? 0;
+  return metric.value.toLocaleString(undefined, { maximumFractionDigits: digits });
 }
