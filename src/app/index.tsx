@@ -38,7 +38,7 @@ type LoadState = 'idle' | 'loading' | 'loaded' | 'error';
 type DashboardRangeDays = 1 | 7 | 14 | 30 | 90;
 
 const GOOGLE_NATIVE_REDIRECT_URI = 'com.francescooddo.fitty:/oauth';
-const RANGE_OPTIONS: Array<{ label: string; value: DashboardRangeDays }> = [
+const RANGE_OPTIONS: { label: string; value: DashboardRangeDays }[] = [
   { label: 'Today', value: 1 },
   { label: '7D', value: 7 },
   { label: '14D', value: 14 },
@@ -652,7 +652,7 @@ function DebugPanel({
 }: {
   expanded: boolean;
   onToggle: () => void;
-  items: Array<{ label: string; value: string }>;
+  items: { label: string; value: string }[];
 }) {
   const theme = useTheme();
 

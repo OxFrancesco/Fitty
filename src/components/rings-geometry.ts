@@ -24,9 +24,9 @@ export type RingProgress = {
 
 export type HeartGeometry = {
   /** Closed loop, equal arc-length spacing, starting at the top notch moving right. */
-  points: Array<{ x: number; y: number }>;
+  points: { x: number; y: number }[];
   /** Unit tangents along the direction of travel, one per point. */
-  tangents: Array<{ x: number; y: number }>;
+  tangents: { x: number; y: number }[];
   perimeter: number;
 };
 

@@ -39,7 +39,7 @@ const HEAD_TINT = 0.32;
 const SHADOW_LEAD = 3;
 
 /** Interpolate along the equal-arc-length sample loop at fraction f of the perimeter. */
-function sampleLoop(arr: Array<{ x: number; y: number }>, f: number) {
+function sampleLoop(arr: { x: number; y: number }[], f: number) {
   'worklet';
   const n = arr.length;
   const idx = Math.min(Math.max(f, 0), 1) * n;

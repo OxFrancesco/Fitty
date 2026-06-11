@@ -126,7 +126,7 @@ const ROLLUP_CONFIGS: RollupConfig[] = [
     unit: 'min',
     extract: (value) => {
       const minutesByLevel = value.activeMinutesRollupByActivityLevel as
-        | Array<{ activeMinutesSum?: unknown }>
+        | { activeMinutesSum?: unknown }[]
         | undefined;
 
       return sumValues(minutesByLevel, (item) => toNumber(item.activeMinutesSum));
