@@ -1,18 +1,12 @@
 import * as ExpoCrypto from 'expo-crypto';
 import * as WebBrowser from 'expo-web-browser';
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import {
-  ActivityIndicator,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  View,
-} from 'react-native';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 
 import { ActivityRings } from '@/components/activity-rings';
 import { HealthCard } from '@/components/health-card';
+import { LoadingDots, SkeletonCard } from '@/components/loading';
 import { SleepCard } from '@/components/sleep-card';
 import { ThemedText } from '@/components/themed-text';
 import { ErrorRed, MaxContentWidth, Spacing } from '@/constants/theme';
@@ -20,6 +14,12 @@ import { useTheme } from '@/hooks/use-theme';
 import { fetchApiJson, getApiBaseUrl } from '@/lib/api-base';
 import { DEBUG_ENABLED } from '@/lib/debug';
 import { ensureFreshToken } from '@/lib/google-auth';
+import {
+  clearSnapshotCache,
+  getCachedSnapshot,
+  isSnapshotFresh,
+  setCachedSnapshot,
+} from '@/lib/health-cache';
 import { clearStoredToken, loadStoredToken, saveStoredToken } from '@/lib/token-store';
 import {
   fetchGoogleHealthSnapshot,
@@ -79,6 +79,16 @@ export default function HomeScreen() {
   const [rangeDays, setRangeDays] = useState<DashboardRangeDays>(1);
   const [showDebug, setShowDebug] = useState(false);
   const [restoring, setRestoring] = useState(true);
+  // True while revalidating in the background — cached data stays on screen.
+  const [refreshing, setRefreshing] = useState(false);
+  // Guards against an older fetch overwriting a newer range's data.
+  const requestIdRef = useRef(0);
+  const snapshotRef = useRef<HealthSnapshot | null>(null);
+
+  const applySnapshot = useCallback((next: HealthSnapshot | null) => {
+    snapshotRef.current = next;
+    setSnapshot(next);
+  }, []);
 
   useEffect(() => {
     let ignore = false;
@@ -104,19 +114,56 @@ export default function HomeScreen() {
     };
   }, []);
 
-  const loadHealthData = useCallback(async (accessToken: string, days: DashboardRangeDays) => {
-    setHealthState('loading');
-    setError(null);
+  const loadHealthData = useCallback(
+    async (accessToken: string, days: DashboardRangeDays, options?: { force?: boolean }) => {
+      const requestId = ++requestIdRef.current;
+      const cached = getCachedSnapshot(days);
+      setError(null);
 
-    try {
-      const healthSnapshot = await fetchGoogleHealthSnapshot(accessToken, { days });
-      setSnapshot(healthSnapshot);
-      setHealthState('loaded');
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : String(loadError));
-      setHealthState('error');
-    }
-  }, []);
+      if (cached) {
+        // Instant: render the cached snapshot immediately.
+        applySnapshot(cached.snapshot);
+        setHealthState('loaded');
+
+        if (!options?.force && isSnapshotFresh(cached)) {
+          // Cancels any superseded in-flight refresh's indicator too.
+          setRefreshing(false);
+          return;
+        }
+      }
+
+      // With anything on screen we revalidate silently; otherwise it's a first load.
+      const background = cached !== null || snapshotRef.current !== null;
+
+      if (background) {
+        setRefreshing(true);
+      } else {
+        setHealthState('loading');
+      }
+
+      try {
+        const healthSnapshot = await fetchGoogleHealthSnapshot(accessToken, { days });
+        setCachedSnapshot(days, healthSnapshot);
+
+        if (requestIdRef.current === requestId) {
+          applySnapshot(healthSnapshot);
+          setHealthState('loaded');
+        }
+      } catch (loadError) {
+        if (requestIdRef.current === requestId) {
+          setError(loadError instanceof Error ? loadError.message : String(loadError));
+          if (!background) {
+            setHealthState('error');
+          }
+        }
+      } finally {
+        if (background && requestIdRef.current === requestId) {
+          setRefreshing(false);
+        }
+      }
+    },
+    [applySnapshot]
+  );
 
   // Restore a persisted session so sign-in survives app restarts.
   useEffect(() => {
@@ -197,6 +244,8 @@ export default function HomeScreen() {
       const nextToken = await fetchApiJson<GoogleTokenResponse>(
         `/api/google/session?state=${encodeURIComponent(state)}`
       );
+      // A fresh sign-in may be a different account — drop any cached data.
+      clearSnapshotCache();
       setToken(nextToken);
       setAuthState('loaded');
       await saveStoredToken(nextToken).catch(() => undefined);
@@ -209,7 +258,7 @@ export default function HomeScreen() {
 
   // Refreshes the access token when it is about to expire, then loads data.
   const loadWithFreshToken = useCallback(
-    async (days: DashboardRangeDays) => {
+    async (days: DashboardRangeDays, options?: { force?: boolean }) => {
       if (!token) {
         return;
       }
@@ -221,8 +270,10 @@ export default function HomeScreen() {
       } catch (refreshError) {
         // Refresh token revoked or expired — force a new sign-in.
         await clearStoredToken().catch(() => undefined);
+        clearSnapshotCache();
         setToken(null);
-        setSnapshot(null);
+        applySnapshot(null);
+        setRefreshing(false);
         setAuthState('idle');
         setHealthState('idle');
         setError(refreshError instanceof Error ? refreshError.message : String(refreshError));
@@ -234,13 +285,13 @@ export default function HomeScreen() {
         saveStoredToken(current).catch(() => undefined);
       }
 
-      loadHealthData(current.accessToken, days);
+      loadHealthData(current.accessToken, days, options);
     },
-    [loadHealthData, token]
+    [applySnapshot, loadHealthData, token]
   );
 
   const refreshHealthData = useCallback(() => {
-    loadWithFreshToken(rangeDays);
+    loadWithFreshToken(rangeDays, { force: true });
   }, [loadWithFreshToken, rangeDays]);
 
   const updateRangeDays = useCallback(
@@ -253,14 +304,19 @@ export default function HomeScreen() {
 
   const signOut = useCallback(() => {
     clearStoredToken().catch(() => undefined);
+    clearSnapshotCache();
     setToken(null);
-    setSnapshot(null);
+    applySnapshot(null);
+    setRefreshing(false);
     setError(null);
     setAuthState('idle');
     setHealthState('idle');
-  }, []);
+  }, [applySnapshot]);
 
   const canLogin = Boolean(config?.clientId && config.hasClientSecret && config.redirectUri && config.appReturnUri);
+
+  // First-ever load — nothing cached yet, so show skeleton cards.
+  const initialLoading = healthState === 'loading' && !snapshot;
 
   // Extract ring data from metrics
   const metricsMap = useMemo(() => {
@@ -320,7 +376,7 @@ export default function HomeScreen() {
     if (restoring) {
       return (
         <View style={[styles.signInScreen, { backgroundColor: theme.background }]}>
-          <ActivityIndicator color={theme.textSecondary} size="large" />
+          <LoadingDots color={theme.textSecondary} size={8} />
         </View>
       );
     }
@@ -336,7 +392,9 @@ export default function HomeScreen() {
           {error && <ErrorBanner message={error} />}
 
           {authState === 'loading' ? (
-            <ActivityIndicator color={theme.textSecondary} size="large" />
+            <View style={styles.signInLoading}>
+              <LoadingDots color={theme.textSecondary} size={8} />
+            </View>
           ) : (
             <ActionButton label="Sign in with Google" disabled={!canLogin} onPress={startGoogleSignIn} />
           )}
@@ -375,12 +433,16 @@ export default function HomeScreen() {
                 {todayStr}
               </ThemedText>
               <View style={styles.headerButtons}>
-                <TextButton
-                  label="Sync"
-                  color={theme.text}
-                  onPress={refreshHealthData}
-                  disabled={healthState === 'loading'}
-                />
+                {refreshing ? (
+                  <LoadingDots color={theme.textSecondary} />
+                ) : (
+                  <TextButton
+                    label="Sync"
+                    color={theme.text}
+                    onPress={refreshHealthData}
+                    disabled={healthState === 'loading'}
+                  />
+                )}
                 <TextButton label="Sign out" color={theme.textSecondary} onPress={signOut} />
               </View>
             </View>
@@ -398,7 +460,7 @@ export default function HomeScreen() {
               return (
                 <Pressable
                   key={option.value}
-                  disabled={healthState === 'loading'}
+                  disabled={initialLoading}
                   onPress={() => updateRangeDays(option.value)}
                   style={({ pressed }) => [
                     styles.segment,
@@ -425,34 +487,45 @@ export default function HomeScreen() {
           </View>
         </Section>
 
-        {healthState === 'loading' && (
-          <View style={styles.loadingRow}>
-            <ActivityIndicator color={theme.textSecondary} />
-            <ThemedText type="small" style={{ color: theme.textSecondary }}>
-              Syncing…
-            </ThemedText>
-          </View>
-        )}
-
         {/* ── Vitals ── */}
         <Section index={3}>
           <SectionHeader title="Vitals" />
           <View style={styles.cardRow}>
-            <SleepCard sessions={snapshot?.sleepSessions ?? []} />
-            <HealthCard label="Heart rate" value={heartRateDisplay} unit="bpm" />
+            {initialLoading ? (
+              <>
+                <SkeletonCard />
+                <SkeletonCard />
+              </>
+            ) : (
+              <>
+                <SleepCard sessions={snapshot?.sleepSessions ?? []} />
+                <HealthCard label="Heart rate" value={heartRateDisplay} unit="bpm" />
+              </>
+            )}
           </View>
         </Section>
 
         {/* ── Measures ── */}
-        {secondaryMetrics.length > 0 && (
+        {initialLoading ? (
           <Section index={4}>
             <SectionHeader title="Measures" />
             <View style={styles.metricGrid}>
-              {secondaryMetrics.map((metric) => (
-                <MetricCard key={metric.id} metric={metric} />
+              {[0, 1, 2, 3].map((slot) => (
+                <SkeletonCard key={slot} />
               ))}
             </View>
           </Section>
+        ) : (
+          secondaryMetrics.length > 0 && (
+            <Section index={4}>
+              <SectionHeader title="Measures" />
+              <View style={styles.metricGrid}>
+                {secondaryMetrics.map((metric) => (
+                  <MetricCard key={metric.id} metric={metric} />
+                ))}
+              </View>
+            </Section>
+          )
         )}
 
         {/* ── Connection diagnostics (debug builds only) ── */}
@@ -802,12 +875,10 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.two + Spacing.half,
     gap: Spacing.half,
   },
-  loadingRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
+  signInLoading: {
+    minHeight: 50,
     justifyContent: 'center',
-    gap: Spacing.two,
-    paddingVertical: Spacing.two,
+    alignItems: 'center',
   },
   debugToggle: {
     paddingVertical: Spacing.one,
