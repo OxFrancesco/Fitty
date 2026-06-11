@@ -4,7 +4,6 @@ import {
   Circle,
   Group,
   Path,
-  PathOp,
   Skia,
   SweepGradient,
   vec,
@@ -19,22 +18,43 @@ import {
   withTiming,
 } from 'react-native-reanimated';
 
-import { CENTER, lighten, RADII, type RingProgress, SIZE, STROKE } from './rings-geometry';
+import {
+  CENTER,
+  lighten,
+  makeHeartGeometry,
+  type RingProgress,
+  SIZE,
+  STROKE,
+} from './rings-geometry';
 
 /**
- * Skia activity rings with a slight 3D treatment:
- * - a sweep gradient brightens each arc toward its head (tube lighting)
+ * Skia activity hearts with a slight 3D treatment:
+ * - a sweep gradient brightens each loop toward its head (tube lighting)
  * - the head cap casts a soft shadow onto the track beneath it
  */
 
-/** How far the arc color shifts toward white at a full ring */
+/** How far the loop color shifts toward white at full progress */
 const HEAD_TINT = 0.32;
 /** Tip shadow is nudged ahead of the head, along the direction of travel */
 const SHADOW_LEAD = 3;
 
-function Ring({ radius, ring }: { radius: number; ring: RingProgress }) {
+/** Interpolate along the equal-arc-length sample loop at fraction f of the perimeter. */
+function sampleLoop(arr: Array<{ x: number; y: number }>, f: number) {
+  'worklet';
+  const n = arr.length;
+  const idx = Math.min(Math.max(f, 0), 1) * n;
+  const i0 = Math.floor(idx) % n;
+  const i1 = (i0 + 1) % n;
+  const frac = idx - Math.floor(idx);
+  const a = arr[i0];
+  const b = arr[i1];
+  return { x: a.x + (b.x - a.x) * frac, y: a.y + (b.y - a.y) * frac };
+}
+
+function Ring({ index, ring }: { index: number; ring: RingProgress }) {
   const progress = useSharedValue(0);
   const headTint = lighten(ring.color, HEAD_TINT);
+  const { points, tangents } = useMemo(() => makeHeartGeometry(index), [index]);
 
   useEffect(() => {
     progress.value = withDelay(
@@ -45,18 +65,16 @@ function Ring({ radius, ring }: { radius: number; ring: RingProgress }) {
 
   const basePath = useMemo(() => {
     const path = Skia.Path.Make();
-    path.addCircle(CENTER, CENTER, radius);
+    points.forEach((p, i) => (i === 0 ? path.moveTo(p.x, p.y) : path.lineTo(p.x, p.y)));
+    path.close();
     return path;
-  }, [radius]);
+  }, [points]);
 
-  // This ring's band — keeps the tip shadow from bleeding into neighbors.
+  // This heart's band — keeps the tip shadow from bleeding into neighbors.
   const band = useMemo(() => {
-    const outer = Skia.Path.Make();
-    outer.addCircle(CENTER, CENTER, radius + STROKE / 2);
-    const inner = Skia.Path.Make();
-    inner.addCircle(CENTER, CENTER, radius - STROKE / 2);
-    return Skia.Path.MakeFromOp(outer, inner, PathOp.Difference) ?? outer;
-  }, [radius]);
+    const outline = basePath.copy();
+    return outline.stroke({ width: STROKE }) ? outline : basePath;
+  }, [basePath]);
 
   const arcPath = useDerivedValue(() => {
     const t = Math.min(Math.max(progress.value, 0.0001), 1);
@@ -64,17 +82,12 @@ function Ring({ radius, ring }: { radius: number; ring: RingProgress }) {
     return path.trim(0, t, false) ?? path;
   });
 
-  const headPos = useDerivedValue(() => {
-    const theta = 2 * Math.PI * progress.value;
-    return { x: CENTER + radius * Math.cos(theta), y: CENTER + radius * Math.sin(theta) };
-  });
+  const headPos = useDerivedValue(() => sampleLoop(points, progress.value));
 
   const shadowPos = useDerivedValue(() => {
-    const theta = 2 * Math.PI * progress.value;
-    return {
-      x: CENTER + radius * Math.cos(theta) - SHADOW_LEAD * Math.sin(theta),
-      y: CENTER + radius * Math.sin(theta) + SHADOW_LEAD * Math.cos(theta),
-    };
+    const pos = sampleLoop(points, progress.value);
+    const tan = sampleLoop(tangents, progress.value);
+    return { x: pos.x + SHADOW_LEAD * tan.x, y: pos.y + SHADOW_LEAD * tan.y };
   });
 
   const headColor = useDerivedValue(() =>
@@ -86,17 +99,17 @@ function Ring({ radius, ring }: { radius: number; ring: RingProgress }) {
   return (
     <>
       {/* Track */}
-      <Circle
-        c={vec(CENTER, CENTER)}
-        r={radius}
+      <Path
+        path={basePath}
         style="stroke"
         strokeWidth={STROKE}
+        strokeJoin="round"
         color={ring.color + '26'}
       />
 
       <Group opacity={arcOpacity}>
-        {/* Progress arc, brightening toward the head */}
-        <Path path={arcPath} style="stroke" strokeWidth={STROKE} strokeCap="round">
+        {/* Progress sweep, brightening toward the head */}
+        <Path path={arcPath} style="stroke" strokeWidth={STROKE} strokeCap="round" strokeJoin="round">
           <SweepGradient c={vec(CENTER, CENTER)} colors={[ring.color, headTint]} />
         </Path>
 
@@ -117,12 +130,10 @@ function Ring({ radius, ring }: { radius: number; ring: RingProgress }) {
 export function RingsGraphic({ rings }: { rings: RingProgress[] }) {
   return (
     <Canvas style={{ width: SIZE, height: SIZE }}>
-      {/* Rotate so arcs start at 12 o'clock */}
-      <Group transform={[{ rotate: -Math.PI / 2 }]} origin={vec(CENTER, CENTER)}>
-        {rings.map((ring, i) => (
-          <Ring key={ring.key} radius={RADII[i]} ring={ring} />
-        ))}
-      </Group>
+      {/* Heart loops start at the top notch and sweep down the right lobe */}
+      {rings.map((ring, i) => (
+        <Ring key={ring.key} index={i} ring={ring} />
+      ))}
     </Canvas>
   );
 }

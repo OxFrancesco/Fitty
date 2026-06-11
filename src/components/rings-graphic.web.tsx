@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import Animated, {
   Easing,
   useAnimatedProps,
@@ -6,19 +6,26 @@ import Animated, {
   withDelay,
   withTiming,
 } from 'react-native-reanimated';
-import Svg, { Circle } from 'react-native-svg';
+import Svg, { Path } from 'react-native-svg';
 
-import { CENTER, RADII, type RingProgress, SIZE, STROKE } from './rings-geometry';
+import { makeHeartGeometry, type RingProgress, SIZE, STROKE } from './rings-geometry';
 
 /**
  * SVG fallback for web — the Skia implementation would require shipping
  * CanvasKit (~3 MB of WASM), so web keeps the flat stroke rendering.
  */
 
-const AnimatedCircle = Animated.createAnimatedComponent(Circle);
+const AnimatedPath = Animated.createAnimatedComponent(Path);
 
-function ProgressRing({ radius, ring }: { radius: number; ring: RingProgress }) {
-  const circumference = 2 * Math.PI * radius;
+function ProgressRing({ index, ring }: { index: number; ring: RingProgress }) {
+  const { points, perimeter } = useMemo(() => makeHeartGeometry(index), [index]);
+  const d = useMemo(
+    () =>
+      points
+        .map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(2)} ${p.y.toFixed(2)}`)
+        .join(' ') + ' Z',
+    [points]
+  );
   const progress = useSharedValue(0);
 
   useEffect(() => {
@@ -29,32 +36,29 @@ function ProgressRing({ radius, ring }: { radius: number; ring: RingProgress }) 
   }, [ring.progress, ring.delay, progress]);
 
   const animatedProps = useAnimatedProps(() => ({
-    strokeDashoffset: circumference * (1 - progress.value),
+    strokeDashoffset: perimeter * (1 - progress.value),
   }));
 
   return (
     <>
       {/* Track */}
-      <Circle
-        cx={CENTER}
-        cy={CENTER}
-        r={radius}
+      <Path
+        d={d}
         stroke={ring.color + '26'}
         strokeWidth={STROKE}
+        strokeLinejoin="round"
         fill="none"
       />
-      {/* Progress arc, starting at 12 o'clock */}
-      <AnimatedCircle
-        cx={CENTER}
-        cy={CENTER}
-        r={radius}
+      {/* Progress sweep, starting at the top notch */}
+      <AnimatedPath
+        d={d}
         stroke={ring.color}
         strokeWidth={STROKE}
         strokeLinecap="round"
-        strokeDasharray={`${circumference}`}
+        strokeLinejoin="round"
+        strokeDasharray={`${perimeter}`}
         animatedProps={animatedProps}
         fill="none"
-        transform={`rotate(-90 ${CENTER} ${CENTER})`}
       />
     </>
   );
@@ -64,7 +68,7 @@ export function RingsGraphic({ rings }: { rings: RingProgress[] }) {
   return (
     <Svg width={SIZE} height={SIZE}>
       {rings.map((ring, i) => (
-        <ProgressRing key={ring.key} radius={RADII[i]} ring={ring} />
+        <ProgressRing key={ring.key} index={i} ring={ring} />
       ))}
     </Svg>
   );
