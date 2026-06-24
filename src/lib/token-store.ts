@@ -11,13 +11,19 @@ import type { GoogleTokenResponse } from '@/lib/google-health';
 const TOKEN_KEY = 'fitty.google_token';
 const ID_TOKEN_KEY = 'fitty.google_id_token';
 
+// Background widget refresh must read the session before the device is
+// unlocked for the current session; the default (WHEN_UNLOCKED) blocks that.
+const STORE_OPTIONS: SecureStore.SecureStoreOptions = {
+  keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
+};
+
 export async function saveStoredToken(token: GoogleTokenResponse) {
   const { idToken, ...rest } = token;
 
-  await SecureStore.setItemAsync(TOKEN_KEY, JSON.stringify(rest));
+  await SecureStore.setItemAsync(TOKEN_KEY, JSON.stringify(rest), STORE_OPTIONS);
 
   if (idToken) {
-    await SecureStore.setItemAsync(ID_TOKEN_KEY, idToken);
+    await SecureStore.setItemAsync(ID_TOKEN_KEY, idToken, STORE_OPTIONS);
   } else {
     await SecureStore.deleteItemAsync(ID_TOKEN_KEY);
   }

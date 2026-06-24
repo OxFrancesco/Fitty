@@ -1,8 +1,27 @@
 import Constants from 'expo-constants';
-import { Platform } from 'react-native';
+import { NativeModules, Platform } from 'react-native';
 
 function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, '');
+}
+
+const DEFAULT_PRODUCTION_API_BASE_URL = 'https://avg-francesco-fitty.expo.app';
+
+function isLocalApiBaseUrl(value: string) {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    return (
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host === '0.0.0.0' ||
+      host.startsWith('10.') ||
+      host.startsWith('192.168.') ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function hostUriToOrigin(hostUri: string) {
@@ -10,15 +29,43 @@ function hostUriToOrigin(hostUri: string) {
   return `http://${normalized}`;
 }
 
+function urlToOrigin(value?: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const url = new URL(value);
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
 export function getApiBaseUrl() {
   const explicitBaseUrl = process.env.EXPO_PUBLIC_API_BASE_URL;
 
   if (explicitBaseUrl) {
-    return trimTrailingSlash(explicitBaseUrl);
+    const normalizedExplicitBaseUrl = trimTrailingSlash(explicitBaseUrl);
+
+    if (__DEV__ || !isLocalApiBaseUrl(normalizedExplicitBaseUrl)) {
+      return normalizedExplicitBaseUrl;
+    }
+  }
+
+  if (!__DEV__) {
+    return DEFAULT_PRODUCTION_API_BASE_URL;
   }
 
   if (Platform.OS === 'web' && typeof window !== 'undefined') {
     return window.location.origin;
+  }
+
+  const sourceCode = NativeModules.SourceCode as { scriptURL?: string } | undefined;
+  const bundleOrigin = urlToOrigin(sourceCode?.scriptURL);
+
+  if (bundleOrigin) {
+    return bundleOrigin;
   }
 
   const constants = Constants as typeof Constants & {
@@ -36,7 +83,7 @@ export function getApiBaseUrl() {
     return hostUriToOrigin(hostUri);
   }
 
-  return 'http://localhost:8081';
+  return DEFAULT_PRODUCTION_API_BASE_URL;
 }
 
 export async function fetchApiJson<T>(path: string, init?: RequestInit) {

@@ -1,4 +1,6 @@
 import * as ExpoCrypto from 'expo-crypto';
+import { Link, useFocusEffect } from 'expo-router';
+import { SymbolView, type SFSymbol } from 'expo-symbols';
 import * as WebBrowser from 'expo-web-browser';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
@@ -21,10 +23,17 @@ import {
   isSnapshotFresh,
   setCachedSnapshot,
 } from '@/lib/health-cache';
+import { registerWidgetRefresh } from '@/lib/background-refresh';
 import { loadDashboardPrefs, saveDashboardPrefs } from '@/lib/dashboard-prefs';
 import { defaultPrefs, type DashboardPrefs } from '@/lib/dashboard-prefs-core';
 import { getDefaultGoal, getMetricDef, SLEEP_CARD_ID } from '@/lib/metric-catalog';
 import { clearStoredToken, loadStoredToken, saveStoredToken } from '@/lib/token-store';
+import {
+  buildWidgetData,
+  emptyWidgetData,
+  getWidgetMetricIds,
+} from '@/lib/widget-data';
+import { syncWidgets } from '@/lib/widget-sync';
 import {
   fetchGoogleHealthSnapshot,
   fetchHealthMetrics,
@@ -42,7 +51,8 @@ WebBrowser.maybeCompleteAuthSession();
 type LoadState = 'idle' | 'loading' | 'loaded' | 'error';
 type DashboardRangeDays = 1 | 7 | 14 | 30 | 90;
 
-const GOOGLE_NATIVE_REDIRECT_URI = 'com.francescooddo.fitty:/oauth';
+const GOOGLE_NATIVE_REDIRECT_URI = 'fitty:/oauth';
+const SETTINGS_SYMBOL = { ios: 'gearshape' as SFSymbol };
 const RANGE_OPTIONS: { label: string; value: DashboardRangeDays }[] = [
   { label: 'Today', value: 1 },
   { label: '7D', value: 7 },
@@ -72,6 +82,14 @@ function buildGoogleAuthUrl(config: GoogleHealthConfig, state: string) {
   return url.toString();
 }
 
+function isGoogleConfigReady(config: GoogleHealthConfig | null): config is GoogleHealthConfig {
+  return Boolean(config?.clientId && config.hasClientSecret && config.redirectUri && config.appReturnUri);
+}
+
+async function fetchGoogleConfig() {
+  return fetchApiJson<GoogleHealthConfig>(`/api/google/config?platform=${Platform.OS}`);
+}
+
 export default function HomeScreen() {
   const theme = useTheme();
   const [config, setConfig] = useState<GoogleHealthConfig | null>(null);
@@ -88,7 +106,7 @@ export default function HomeScreen() {
   const [showDebug, setShowDebug] = useState(false);
   const [restoring, setRestoring] = useState(true);
   // True while revalidating in the background — cached data stays on screen.
-  const [refreshing, setRefreshing] = useState(false);
+  const [, setRefreshing] = useState(false);
   // Guards against an older fetch overwriting a newer range's data.
   const requestIdRef = useRef(0);
   const snapshotRef = useRef<HealthSnapshot | null>(null);
@@ -99,18 +117,22 @@ export default function HomeScreen() {
     prefsRef.current = prefs;
   }, [prefs]);
 
-  // Metrics the dashboard needs: every ring plus every visible metric card.
+  // Metrics the dashboard and widgets need: rings, widget slots, and visible cards.
   const neededIds = useMemo(() => {
     const ids = new Set<string>();
 
-    for (const id of [...prefs.rings, ...prefs.cards]) {
+    for (const id of [
+      ...prefs.rings,
+      ...getWidgetMetricIds(prefs, { includeConfigurable: Platform.OS === 'ios' }),
+      ...prefs.cards,
+    ]) {
       if (id !== SLEEP_CARD_ID && getMetricDef(id)) {
         ids.add(id);
       }
     }
 
     return [...ids];
-  }, [prefs.rings, prefs.cards]);
+  }, [prefs]);
 
   const neededIdsRef = useRef(neededIds);
   useEffect(() => {
@@ -127,10 +149,11 @@ export default function HomeScreen() {
 
     async function loadConfig() {
       try {
-        const data = await fetchApiJson<GoogleHealthConfig>(`/api/google/config?platform=${Platform.OS}`);
+        const data = await fetchGoogleConfig();
 
         if (!ignore) {
           setConfig(data);
+          setConfigError(null);
         }
       } catch (loadError) {
         if (!ignore) {
@@ -146,22 +169,41 @@ export default function HomeScreen() {
     };
   }, []);
 
-  // Restore persisted dashboard customization (rings, goals, cards).
-  useEffect(() => {
-    let ignore = false;
+  // Restore persisted dashboard customization and pick up changes made in Settings.
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
 
-    loadDashboardPrefs()
-      .then((stored) => {
-        if (!ignore) {
-          setPrefs(stored);
+      async function refreshStoredState() {
+        const [storedPrefs, storedToken] = await Promise.all([
+          loadDashboardPrefs(),
+          loadStoredToken(),
+        ]);
+
+        if (!active) {
+          return;
         }
-      })
-      .catch(() => undefined);
 
-    return () => {
-      ignore = true;
-    };
-  }, []);
+        setPrefs(storedPrefs);
+
+        if (!storedToken && token) {
+          clearSnapshotCache();
+          setToken(null);
+          applySnapshot(null);
+          setRefreshing(false);
+          setAuthState('idle');
+          setHealthState('idle');
+          setError(null);
+        }
+      }
+
+      refreshStoredState().catch(() => undefined);
+
+      return () => {
+        active = false;
+      };
+    }, [applySnapshot, token])
+  );
 
   const persistPrefs = useCallback((next: DashboardPrefs) => {
     setPrefs(next);
@@ -292,6 +334,9 @@ export default function HomeScreen() {
         const stored = await loadStoredToken();
 
         if (!stored || ignore) {
+          if (!ignore) {
+            await syncWidgets(emptyWidgetData(prefsRef.current)).catch(() => undefined);
+          }
           return;
         }
 
@@ -311,6 +356,9 @@ export default function HomeScreen() {
       } catch {
         // Stored session can no longer be refreshed — require a new sign-in.
         await clearStoredToken().catch(() => undefined);
+        if (!ignore) {
+          await syncWidgets(emptyWidgetData(prefsRef.current)).catch(() => undefined);
+        }
       } finally {
         if (!ignore) {
           setRestoring(false);
@@ -326,19 +374,23 @@ export default function HomeScreen() {
   }, [loadHealthData]);
 
   const startGoogleSignIn = useCallback(async () => {
-    if (!config?.clientId || !config.hasClientSecret || !config.redirectUri || !config.appReturnUri) {
-      setError('Google OAuth is not ready. Check .env.local and restart Expo.');
-      return;
-    }
-
     setAuthState('loading');
     setError(null);
 
     try {
-      const appReturnUri = config.appReturnUri || GOOGLE_NATIVE_REDIRECT_URI;
+      const activeConfig = isGoogleConfigReady(config) ? config : await fetchGoogleConfig();
+
+      setConfig(activeConfig);
+      setConfigError(null);
+
+      if (!isGoogleConfigReady(activeConfig)) {
+        throw new Error('Google OAuth config is incomplete. Check the API server environment.');
+      }
+
+      const appReturnUri = activeConfig.appReturnUri || GOOGLE_NATIVE_REDIRECT_URI;
       const state = createOAuthState(appReturnUri);
       const result = await WebBrowser.openAuthSessionAsync(
-        buildGoogleAuthUrl(config, state),
+        buildGoogleAuthUrl(activeConfig, state),
         appReturnUri
       );
 
@@ -350,6 +402,7 @@ export default function HomeScreen() {
       const returnUrl = new URL(result.url);
       const returnedState = returnUrl.searchParams.get('state');
       const oauthError = returnUrl.searchParams.get('error');
+      const code = returnUrl.searchParams.get('code');
 
       if (oauthError) {
         throw new Error(oauthError);
@@ -359,9 +412,18 @@ export default function HomeScreen() {
         throw new Error('Google OAuth state did not match. Try signing in again.');
       }
 
-      const nextToken = await fetchApiJson<GoogleTokenResponse>(
-        `/api/google/session?state=${encodeURIComponent(state)}`
-      );
+      // The callback forwards the one-time code; exchange it server-side
+      // (stateless — no session has to survive between serverless requests).
+      // Fall back to the legacy session lookup for older server deployments.
+      const nextToken = code
+        ? await fetchApiJson<GoogleTokenResponse>('/api/google/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code, redirectUri: activeConfig.redirectUri }),
+          })
+        : await fetchApiJson<GoogleTokenResponse>(
+            `/api/google/session?state=${encodeURIComponent(state)}`
+          );
       // A fresh sign-in may be a different account — drop any cached data.
       clearSnapshotCache();
       setToken(nextToken);
@@ -407,10 +469,6 @@ export default function HomeScreen() {
     },
     [applySnapshot, loadHealthData, token]
   );
-
-  const refreshHealthData = useCallback(() => {
-    loadWithFreshToken(rangeDays, { force: true });
-  }, [loadWithFreshToken, rangeDays]);
 
   // When customization adds a metric we have not fetched yet, top up the
   // current snapshot in the background instead of reloading everything.
@@ -468,18 +526,7 @@ export default function HomeScreen() {
     [loadWithFreshToken]
   );
 
-  const signOut = useCallback(() => {
-    clearStoredToken().catch(() => undefined);
-    clearSnapshotCache();
-    setToken(null);
-    applySnapshot(null);
-    setRefreshing(false);
-    setError(null);
-    setAuthState('idle');
-    setHealthState('idle');
-  }, [applySnapshot]);
-
-  const canLogin = Boolean(config?.clientId && config.hasClientSecret && config.redirectUri && config.appReturnUri);
+  const canLogin = authState !== 'loading';
 
   // First-ever load — nothing cached yet, so show skeleton cards.
   const initialLoading = healthState === 'loading' && !snapshot;
@@ -501,6 +548,70 @@ export default function HomeScreen() {
       })),
     [prefs.rings, prefs.goals, metricsMap]
   );
+
+  // Mirror dashboard data onto the home-screen widgets whenever data or widget
+  // customization changes. Widgets always show "today" regardless of the
+  // dashboard's selected range, so top up missing 1-day widget metrics when the
+  // current dashboard range is not Today.
+  useEffect(() => {
+    if (!restoring && !token) {
+      syncWidgets(emptyWidgetData(prefs)).catch(() => undefined);
+    }
+  }, [restoring, token, prefs]);
+
+  useEffect(() => {
+    if (!token) {
+      return;
+    }
+
+    let cancelled = false;
+
+    (async () => {
+      const daySnapshot = rangeDays === 1 ? snapshot : (getCachedSnapshot(1)?.snapshot ?? null);
+      const widgetIds = getWidgetMetricIds(prefs, { includeConfigurable: Platform.OS === 'ios' });
+      let metrics = daySnapshot?.metrics ?? [];
+      const missing = widgetIds.filter((id) => !metrics.some((metric) => metric.id === id));
+
+      if (missing.length) {
+        if (rangeDays === 1) {
+          return;
+        }
+
+        try {
+          const fresh = await ensureFreshToken(token);
+          const result = await fetchHealthMetrics(fresh.accessToken, missing, 1);
+          metrics = [
+            ...metrics.filter((metric) => !missing.includes(metric.id)),
+            ...result.metrics,
+          ];
+
+          if (daySnapshot) {
+            setCachedSnapshot(1, mergeSnapshotMetrics(daySnapshot, result.metrics, result.raw));
+          }
+        } catch {
+          // Widgets keep the last available values until the next foreground sync.
+          if (!daySnapshot) {
+            return;
+          }
+        }
+      }
+
+      if (!cancelled) {
+        syncWidgets(buildWidgetData(prefs, metrics)).catch(() => undefined);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [token, snapshot, prefs, rangeDays]);
+
+  // Keep widgets fresh while the app is backgrounded.
+  useEffect(() => {
+    if (token) {
+      registerWidgetRefresh().catch(() => undefined);
+    }
+  }, [token]);
 
   const userName = useMemo(() => {
     if (token?.idToken) {
@@ -583,17 +694,25 @@ export default function HomeScreen() {
                 {todayStr}
               </ThemedText>
               <View style={styles.headerButtons}>
-                {refreshing ? (
-                  <LoadingDots color={theme.textSecondary} />
-                ) : (
-                  <TextButton
-                    label="Sync"
-                    color={theme.text}
-                    onPress={refreshHealthData}
-                    disabled={healthState === 'loading'}
-                  />
-                )}
-                <TextButton label="Sign out" color={theme.textSecondary} onPress={signOut} />
+                <Link href="/settings" asChild>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Settings"
+                    hitSlop={8}
+                    style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}
+                  >
+                    <SymbolView
+                      name={SETTINGS_SYMBOL}
+                      fallback={
+                        <ThemedText type="smallBold" style={{ color: theme.textSecondary }}>
+                          Settings
+                        </ThemedText>
+                      }
+                      size={22}
+                      tintColor={theme.textSecondary}
+                    />
+                  </Pressable>
+                </Link>
               </View>
             </View>
             <ThemedText type="title">{greeting}</ThemedText>
@@ -945,7 +1064,14 @@ const styles = StyleSheet.create({
   },
   headerButtons: {
     flexDirection: 'row',
-    gap: Spacing.three,
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  iconButton: {
+    width: 28,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   segments: {
     flexDirection: 'row',

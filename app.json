@@ -5,21 +5,32 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": [
-      "fitty",
-      "com.francescooddo.fitty"
-    ],
+    "scheme": "fitty",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon",
-      "bundleIdentifier": "com.francescooddo.fitty"
+      "bundleIdentifier": "com.francescooddo.fitty",
+      "buildNumber": "3",
+      "entitlements": {
+        "com.apple.developer.healthkit": true
+      },
+      "infoPlist": {
+        "NSHealthShareUsageDescription": "OpenFit uses Apple Health permissions for synced health records you choose to export.",
+        "NSHealthUpdateUsageDescription": "OpenFit writes selected Google Health weight, sleep, and workout records to Apple Health when you start an export.",
+        "UIBackgroundModes": [
+          "fetch",
+          "processing",
+          "remote-notification"
+        ]
+      },
+      "config": {
+        "usesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "com.francescooddo.fitty",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#FFFFFF",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false
@@ -40,11 +51,476 @@
           }
         }
       ],
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "expo-widgets",
+        {
+          "groupIdentifier": "group.com.francescooddo.fitty",
+          "widgets": [
+            {
+              "name": "OneValue",
+              "displayName": "OpenFit",
+              "description": "Health metrics with configurable style and slots",
+              "supportedFamilies": [
+                "systemSmall",
+                "systemMedium",
+                "systemLarge"
+              ],
+              "configuration": {
+                "title": "OpenFit",
+                "description": "Choose the widget style and metrics.",
+                "parameters": {
+                  "style": {
+                    "title": "Style",
+                    "type": "enum",
+                    "default": "hearts",
+                    "values": [
+                      {
+                        "name": "Hearts",
+                        "value": "hearts"
+                      },
+                      {
+                        "name": "Rings",
+                        "value": "rings"
+                      },
+                      {
+                        "name": "Values",
+                        "value": "values"
+                      }
+                    ]
+                  },
+                  "firstMetric": {
+                    "title": "First metric",
+                    "type": "enum",
+                    "default": "appFirst",
+                    "values": [
+                      {
+                        "name": "App first",
+                        "value": "appFirst"
+                      },
+                      {
+                        "name": "App second",
+                        "value": "appSecond"
+                      },
+                      {
+                        "name": "App third",
+                        "value": "appThird"
+                      },
+                      {
+                        "name": "Steps",
+                        "value": "steps"
+                      },
+                      {
+                        "name": "Active calories",
+                        "value": "activeEnergyBurned"
+                      },
+                      {
+                        "name": "Total calories",
+                        "value": "totalCalories"
+                      },
+                      {
+                        "name": "Active minutes",
+                        "value": "activeMinutes"
+                      },
+                      {
+                        "name": "Zone minutes",
+                        "value": "activeZoneMinutes"
+                      },
+                      {
+                        "name": "Distance",
+                        "value": "distance"
+                      },
+                      {
+                        "name": "Floors",
+                        "value": "floors"
+                      },
+                      {
+                        "name": "Elevation",
+                        "value": "altitude"
+                      },
+                      {
+                        "name": "Sedentary time",
+                        "value": "sedentaryPeriod"
+                      },
+                      {
+                        "name": "Swim strokes",
+                        "value": "swimLengthsData"
+                      },
+                      {
+                        "name": "Run VO2 max",
+                        "value": "runVo2Max"
+                      },
+                      {
+                        "name": "Average heart rate",
+                        "value": "heartRate"
+                      },
+                      {
+                        "name": "Resting heart rate",
+                        "value": "dailyRestingHeartRate"
+                      },
+                      {
+                        "name": "Heart rate variability",
+                        "value": "dailyHeartRateVariability"
+                      },
+                      {
+                        "name": "Time in HR zones",
+                        "value": "timeInHeartRateZone"
+                      },
+                      {
+                        "name": "Zone calories",
+                        "value": "caloriesInHeartRateZone"
+                      },
+                      {
+                        "name": "VO2 max",
+                        "value": "dailyVo2Max"
+                      },
+                      {
+                        "name": "Weight",
+                        "value": "weight"
+                      },
+                      {
+                        "name": "Body fat",
+                        "value": "bodyFat"
+                      },
+                      {
+                        "name": "Body temperature",
+                        "value": "coreBodyTemperature"
+                      },
+                      {
+                        "name": "Blood glucose",
+                        "value": "bloodGlucose"
+                      },
+                      {
+                        "name": "Blood oxygen",
+                        "value": "dailyOxygenSaturation"
+                      },
+                      {
+                        "name": "Respiratory rate",
+                        "value": "dailyRespiratoryRate"
+                      },
+                      {
+                        "name": "Calories eaten",
+                        "value": "nutritionLog"
+                      },
+                      {
+                        "name": "Hydration",
+                        "value": "hydrationLog"
+                      }
+                    ]
+                  },
+                  "secondMetric": {
+                    "title": "Second metric",
+                    "type": "enum",
+                    "default": "appSecond",
+                    "values": [
+                      {
+                        "name": "App first",
+                        "value": "appFirst"
+                      },
+                      {
+                        "name": "App second",
+                        "value": "appSecond"
+                      },
+                      {
+                        "name": "App third",
+                        "value": "appThird"
+                      },
+                      {
+                        "name": "Steps",
+                        "value": "steps"
+                      },
+                      {
+                        "name": "Active calories",
+                        "value": "activeEnergyBurned"
+                      },
+                      {
+                        "name": "Total calories",
+                        "value": "totalCalories"
+                      },
+                      {
+                        "name": "Active minutes",
+                        "value": "activeMinutes"
+                      },
+                      {
+                        "name": "Zone minutes",
+                        "value": "activeZoneMinutes"
+                      },
+                      {
+                        "name": "Distance",
+                        "value": "distance"
+                      },
+                      {
+                        "name": "Floors",
+                        "value": "floors"
+                      },
+                      {
+                        "name": "Elevation",
+                        "value": "altitude"
+                      },
+                      {
+                        "name": "Sedentary time",
+                        "value": "sedentaryPeriod"
+                      },
+                      {
+                        "name": "Swim strokes",
+                        "value": "swimLengthsData"
+                      },
+                      {
+                        "name": "Run VO2 max",
+                        "value": "runVo2Max"
+                      },
+                      {
+                        "name": "Average heart rate",
+                        "value": "heartRate"
+                      },
+                      {
+                        "name": "Resting heart rate",
+                        "value": "dailyRestingHeartRate"
+                      },
+                      {
+                        "name": "Heart rate variability",
+                        "value": "dailyHeartRateVariability"
+                      },
+                      {
+                        "name": "Time in HR zones",
+                        "value": "timeInHeartRateZone"
+                      },
+                      {
+                        "name": "Zone calories",
+                        "value": "caloriesInHeartRateZone"
+                      },
+                      {
+                        "name": "VO2 max",
+                        "value": "dailyVo2Max"
+                      },
+                      {
+                        "name": "Weight",
+                        "value": "weight"
+                      },
+                      {
+                        "name": "Body fat",
+                        "value": "bodyFat"
+                      },
+                      {
+                        "name": "Body temperature",
+                        "value": "coreBodyTemperature"
+                      },
+                      {
+                        "name": "Blood glucose",
+                        "value": "bloodGlucose"
+                      },
+                      {
+                        "name": "Blood oxygen",
+                        "value": "dailyOxygenSaturation"
+                      },
+                      {
+                        "name": "Respiratory rate",
+                        "value": "dailyRespiratoryRate"
+                      },
+                      {
+                        "name": "Calories eaten",
+                        "value": "nutritionLog"
+                      },
+                      {
+                        "name": "Hydration",
+                        "value": "hydrationLog"
+                      }
+                    ]
+                  },
+                  "thirdMetric": {
+                    "title": "Third metric",
+                    "type": "enum",
+                    "default": "appThird",
+                    "values": [
+                      {
+                        "name": "App first",
+                        "value": "appFirst"
+                      },
+                      {
+                        "name": "App second",
+                        "value": "appSecond"
+                      },
+                      {
+                        "name": "App third",
+                        "value": "appThird"
+                      },
+                      {
+                        "name": "Steps",
+                        "value": "steps"
+                      },
+                      {
+                        "name": "Active calories",
+                        "value": "activeEnergyBurned"
+                      },
+                      {
+                        "name": "Total calories",
+                        "value": "totalCalories"
+                      },
+                      {
+                        "name": "Active minutes",
+                        "value": "activeMinutes"
+                      },
+                      {
+                        "name": "Zone minutes",
+                        "value": "activeZoneMinutes"
+                      },
+                      {
+                        "name": "Distance",
+                        "value": "distance"
+                      },
+                      {
+                        "name": "Floors",
+                        "value": "floors"
+                      },
+                      {
+                        "name": "Elevation",
+                        "value": "altitude"
+                      },
+                      {
+                        "name": "Sedentary time",
+                        "value": "sedentaryPeriod"
+                      },
+                      {
+                        "name": "Swim strokes",
+                        "value": "swimLengthsData"
+                      },
+                      {
+                        "name": "Run VO2 max",
+                        "value": "runVo2Max"
+                      },
+                      {
+                        "name": "Average heart rate",
+                        "value": "heartRate"
+                      },
+                      {
+                        "name": "Resting heart rate",
+                        "value": "dailyRestingHeartRate"
+                      },
+                      {
+                        "name": "Heart rate variability",
+                        "value": "dailyHeartRateVariability"
+                      },
+                      {
+                        "name": "Time in HR zones",
+                        "value": "timeInHeartRateZone"
+                      },
+                      {
+                        "name": "Zone calories",
+                        "value": "caloriesInHeartRateZone"
+                      },
+                      {
+                        "name": "VO2 max",
+                        "value": "dailyVo2Max"
+                      },
+                      {
+                        "name": "Weight",
+                        "value": "weight"
+                      },
+                      {
+                        "name": "Body fat",
+                        "value": "bodyFat"
+                      },
+                      {
+                        "name": "Body temperature",
+                        "value": "coreBodyTemperature"
+                      },
+                      {
+                        "name": "Blood glucose",
+                        "value": "bloodGlucose"
+                      },
+                      {
+                        "name": "Blood oxygen",
+                        "value": "dailyOxygenSaturation"
+                      },
+                      {
+                        "name": "Respiratory rate",
+                        "value": "dailyRespiratoryRate"
+                      },
+                      {
+                        "name": "Calories eaten",
+                        "value": "nutritionLog"
+                      },
+                      {
+                        "name": "Hydration",
+                        "value": "hydrationLog"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "./plugins/with-widget-target-version",
+      "expo-background-task",
+      [
+        "react-native-android-widget",
+        {
+          "widgets": [
+            {
+              "name": "OneValue",
+              "label": "1:1 Tracker",
+              "description": "One main tracker at a glance",
+              "minWidth": "80dp",
+              "minHeight": "80dp",
+              "targetCellWidth": 1,
+              "targetCellHeight": 1,
+              "updatePeriodMillis": 1800000
+            },
+            {
+              "name": "TwoValues",
+              "label": "2:2 Trackers",
+              "description": "Two main trackers together",
+              "minWidth": "180dp",
+              "minHeight": "180dp",
+              "targetCellWidth": 2,
+              "targetCellHeight": 2,
+              "updatePeriodMillis": 1800000
+            },
+            {
+              "name": "RingValues",
+              "label": "2:3 Hearts + Stats",
+              "description": "Hearts plus three tracker stats",
+              "minWidth": "180dp",
+              "minHeight": "250dp",
+              "targetCellWidth": 2,
+              "targetCellHeight": 3,
+              "updatePeriodMillis": 1800000
+            }
+          ]
+        }
+      ],
+      "expo-font",
+      "expo-image"
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "build": {
+          "experimental": {
+            "ios": {
+              "appExtensions": [
+                {
+                  "targetName": "ExpoWidgetsTarget",
+                  "bundleIdentifier": "com.francescooddo.fitty.ExpoWidgetsTarget",
+                  "entitlements": {
+                    "com.apple.security.application-groups": [
+                      "group.com.francescooddo.fitty"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "projectId": "249804cd-24fd-4b3b-905d-bace66854ef5"
+      }
+    },
+    "owner": "avg_francesco"
   }
 }

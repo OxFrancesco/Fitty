@@ -1,8 +1,4 @@
-import {
-  exchangeGoogleCode,
-  getGoogleAppReturnUri,
-  storeGoogleOAuthSession,
-} from '@/lib/google-oauth-server';
+import { getGoogleAppReturnUri } from '@/lib/google-oauth-server';
 
 function buildAppRedirect(params: Record<string, string>) {
   const url = new URL(getGoogleAppReturnUri());
@@ -66,7 +62,6 @@ export async function GET(request: Request) {
   const requestUrl = new URL(request.url);
   const code = requestUrl.searchParams.get('code');
   const state = requestUrl.searchParams.get('state');
-  const callbackUri = `${requestUrl.origin}${requestUrl.pathname}`;
   const oauthError =
     requestUrl.searchParams.get('error_description') ?? requestUrl.searchParams.get('error');
 
@@ -88,21 +83,12 @@ export async function GET(request: Request) {
     );
   }
 
-  try {
-    const token = await exchangeGoogleCode({
-      code,
-      redirectUri: callbackUri,
-      includeClientSecret: true,
-    });
-    storeGoogleOAuthSession(state, token);
-    return Response.redirect(buildStateAppRedirect(state, { state, status: 'success' }), 302);
-  } catch (error) {
-    return Response.redirect(
-      buildStateAppRedirect(state, {
-        state,
-        error: error instanceof Error ? error.message : String(error),
-      }),
-      302
-    );
-  }
+  // Forward the one-time authorization code to the app, which exchanges it
+  // via /api/google/token. Keeping the handoff stateless matters on serverless
+  // hosting, where the callback and a follow-up request can hit different
+  // instances and an in-memory session would be lost.
+  return Response.redirect(
+    buildStateAppRedirect(state, { state, code, status: 'success' }),
+    302
+  );
 }

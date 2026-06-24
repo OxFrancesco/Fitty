@@ -33,5 +33,8 @@ export async function loadDashboardPrefs(): Promise<DashboardPrefs> {
 }
 
 export async function saveDashboardPrefs(prefs: DashboardPrefs) {
-  await SecureStore.setItemAsync(PREFS_KEY, JSON.stringify(prefs));
+  // AFTER_FIRST_UNLOCK so the background widget-refresh task can read prefs.
+  await SecureStore.setItemAsync(PREFS_KEY, JSON.stringify(prefs), {
+    keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
+  });
 }

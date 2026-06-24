@@ -1,7 +1,7 @@
 import type { GoogleTokenResponse } from '@/lib/google-health';
 
-const DEFAULT_GOOGLE_CALLBACK_URI = 'http://localhost:8081/api/google/callback';
-const DEFAULT_APP_RETURN_URI = 'com.francescooddo.fitty:/oauth';
+const DEFAULT_GOOGLE_CALLBACK_URI = 'https://avg-francesco-fitty.expo.app/api/google/callback';
+const DEFAULT_APP_RETURN_URI = 'fitty:/oauth';
 const SESSION_TTL_MS = 2 * 60 * 1000;
 
 type OAuthStore = Map<string, { token: GoogleTokenResponse; expiresAt: number }>;
@@ -39,6 +39,10 @@ function cleanupExpiredSessions(store: OAuthStore) {
 
 export function getGoogleCallbackUri() {
   return process.env.EXPO_PUBLIC_GOOGLE_REDIRECT_URI ?? process.env.GOOGLE_REDIRECT_URI ?? DEFAULT_GOOGLE_CALLBACK_URI;
+}
+
+export function getConfiguredGoogleCallbackUri() {
+  return process.env.EXPO_PUBLIC_GOOGLE_REDIRECT_URI ?? process.env.GOOGLE_REDIRECT_URI ?? null;
 }
 
 export function getGoogleAppReturnUri() {

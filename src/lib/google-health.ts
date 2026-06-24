@@ -99,6 +99,44 @@ export type HealthSnapshotOptions = {
   metricIds?: string[];
 };
 
+export type GoogleHealthAppleSyncRecord =
+  | {
+      kind: 'weight';
+      sourceDataType: 'weight';
+      sourceId: string;
+      startTime: string;
+      valueKg: number;
+    }
+  | {
+      kind: 'sleep';
+      sourceDataType: 'sleep';
+      sourceId: string;
+      startTime: string;
+      endTime: string;
+      name: string;
+    }
+  | {
+      kind: 'workout';
+      sourceDataType: 'exercise';
+      sourceId: string;
+      startTime: string;
+      endTime: string;
+      name: string;
+      googleExerciseType: string;
+      caloriesKcal?: number;
+      distanceMeters?: number;
+    };
+
+export type GoogleHealthAppleSyncFetchResult = {
+  records: GoogleHealthAppleSyncRecord[];
+  rangeLabel: string;
+  rawCounts: {
+    weight: number;
+    sleep: number;
+    exercise: number;
+  };
+};
+
 type DataPoint = Record<string, any>;
 
 function toCivilDateTime(date: Date) {
@@ -164,6 +202,37 @@ async function googleHealthFetch<T>(accessToken: string, path: string, init?: Re
   }
 
   return data as T;
+}
+
+async function fetchGoogleHealthDataPoints(
+  accessToken: string,
+  dataType: string,
+  filter: string,
+  pageSize: number
+) {
+  const points: DataPoint[] = [];
+  let pageToken: string | undefined;
+
+  do {
+    const params = new URLSearchParams({
+      pageSize: String(pageSize),
+      filter,
+    });
+
+    if (pageToken) {
+      params.set('pageToken', pageToken);
+    }
+
+    const data = await googleHealthFetch<{
+      dataPoints?: DataPoint[];
+      nextPageToken?: string;
+    }>(accessToken, `/users/me/dataTypes/${dataType}/dataPoints?${params.toString()}`);
+
+    points.push(...(data.dataPoints ?? []));
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+
+  return points;
 }
 
 function extractGoogleError(data: unknown, status: number) {
@@ -357,6 +426,84 @@ function normalizeSleep(point: DataPoint): SleepSummary | null {
   };
 }
 
+function isValidInstant(value: string | undefined) {
+  return Boolean(value && Number.isFinite(Date.parse(value)));
+}
+
+function isValidInterval(startTime: string | undefined, endTime: string | undefined) {
+  return (
+    isValidInstant(startTime) &&
+    isValidInstant(endTime) &&
+    Date.parse(String(endTime)) > Date.parse(String(startTime))
+  );
+}
+
+function googleSourceId(point: DataPoint, fallback: string) {
+  return String(point.name ?? fallback);
+}
+
+function normalizeWeightForAppleSync(point: DataPoint): GoogleHealthAppleSyncRecord | null {
+  const weight = point.weight ?? {};
+  const grams = toNumber(weight.weightGrams);
+  const sampleTime = weight.sampleTime?.physicalTime;
+
+  if (grams === null || grams <= 0 || !isValidInstant(sampleTime)) {
+    return null;
+  }
+
+  return {
+    kind: 'weight',
+    sourceDataType: 'weight',
+    sourceId: googleSourceId(point, `weight-${sampleTime}-${grams}`),
+    startTime: sampleTime,
+    valueKg: grams / 1_000,
+  };
+}
+
+function normalizeSleepForAppleSync(point: DataPoint): GoogleHealthAppleSyncRecord | null {
+  const sleep = point.sleep ?? {};
+  const startTime = sleep.interval?.startTime;
+  const endTime = sleep.interval?.endTime;
+
+  if (!isValidInterval(startTime, endTime)) {
+    return null;
+  }
+
+  return {
+    kind: 'sleep',
+    sourceDataType: 'sleep',
+    sourceId: googleSourceId(point, `sleep-${startTime}-${endTime}`),
+    startTime,
+    endTime,
+    name: sleep.metadata?.nap ? 'Nap' : 'Sleep',
+  };
+}
+
+function normalizeExerciseForAppleSync(point: DataPoint): GoogleHealthAppleSyncRecord | null {
+  const exercise = point.exercise ?? {};
+  const startTime = exercise.interval?.startTime;
+  const endTime = exercise.interval?.endTime;
+  const metrics = exercise.metricsSummary ?? {};
+  const distanceMillimeters = toNumber(metrics.distanceMillimeters);
+  const caloriesKcal = toNumber(metrics.caloriesKcal);
+
+  if (!isValidInterval(startTime, endTime)) {
+    return null;
+  }
+
+  return {
+    kind: 'workout',
+    sourceDataType: 'exercise',
+    sourceId: googleSourceId(point, `exercise-${startTime}-${endTime}-${exercise.exerciseType ?? 'OTHER'}`),
+    startTime,
+    endTime,
+    name: String(exercise.displayName ?? exercise.exerciseType ?? 'Workout'),
+    googleExerciseType: String(exercise.exerciseType ?? 'OTHER'),
+    ...(caloriesKcal !== null ? { caloriesKcal } : {}),
+    ...(distanceMillimeters !== null ? { distanceMeters: distanceMillimeters / 1_000 } : {}),
+  };
+}
+
 function classifySleepKind(
   sleep: Record<string, any>,
   startTime: string | undefined,
@@ -433,6 +580,40 @@ export async function fetchGoogleHealthSnapshot(
       sleep: sleepData,
       identity,
       profile,
+    },
+  };
+}
+
+export async function fetchGoogleHealthAppleSyncRecords(
+  accessToken: string,
+  options: { days?: number } = {}
+): Promise<GoogleHealthAppleSyncFetchResult> {
+  const { start, end } = getRollingWindow(options.days ?? 30);
+  const rangeLabel = formatRangeLabel(start, end);
+
+  const weightFilter = `weight.sample_time.civil_time >= "${toIsoDate(start)}" AND weight.sample_time.civil_time < "${toIsoDate(end)}"`;
+  const exerciseFilter = `exercise.interval.civil_start_time >= "${toIsoDate(start)}" AND exercise.interval.civil_start_time < "${toIsoDate(end)}"`;
+  const sleepFilter = `sleep.interval.civil_end_time >= "${toIsoDate(start)}" AND sleep.interval.civil_end_time < "${toIsoDate(end)}"`;
+
+  const [weightPoints, exercisePoints, sleepPoints] = await Promise.all([
+    fetchGoogleHealthDataPoints(accessToken, 'weight', weightFilter, 500),
+    fetchGoogleHealthDataPoints(accessToken, 'exercise', exerciseFilter, 25),
+    fetchGoogleHealthDataPoints(accessToken, 'sleep', sleepFilter, 25),
+  ]);
+
+  const records = [
+    ...weightPoints.map(normalizeWeightForAppleSync),
+    ...exercisePoints.map(normalizeExerciseForAppleSync),
+    ...sleepPoints.map(normalizeSleepForAppleSync),
+  ].filter((record): record is GoogleHealthAppleSyncRecord => record !== null);
+
+  return {
+    records,
+    rangeLabel,
+    rawCounts: {
+      weight: weightPoints.length,
+      sleep: sleepPoints.length,
+      exercise: exercisePoints.length,
     },
   };
 }

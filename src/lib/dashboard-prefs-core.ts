@@ -14,6 +14,8 @@ import {
 export type DashboardPrefs = {
   /** Metric id per ring slot (outer, middle, inner) */
   rings: [string, string, string];
+  /** Metric id per widget value slot (first, second, third) */
+  widgetMetrics: [string, string, string];
   /** Per-metric goal overrides; defaults come from the catalog */
   goals: Record<string, number>;
   /** Visible card ids in display order ('sleep' is a pseudo-card) */
@@ -26,6 +28,7 @@ export const LEGACY_GREEN_RING_KEY = 'fitty.green_ring_metric';
 export function defaultPrefs(): DashboardPrefs {
   return {
     rings: [...DEFAULT_RING_IDS],
+    widgetMetrics: [...DEFAULT_RING_IDS],
     goals: {},
     cards: [...DEFAULT_CARD_IDS],
   };
@@ -91,6 +94,28 @@ function normalizeCards(value: unknown): string[] {
   return cards;
 }
 
+function normalizeWidgetMetrics(value: unknown, rings: [string, string, string]): [string, string, string] {
+  const incoming = Array.isArray(value) ? value : [];
+  const used = new Set<string>();
+
+  const widgetMetrics = rings.map((fallback, slot) => {
+    const candidate = typeof incoming[slot] === 'string' ? (incoming[slot] as string) : fallback;
+    let id = getMetricDef(candidate) && !used.has(candidate) ? candidate : fallback;
+
+    if (used.has(id)) {
+      id =
+        [...DEFAULT_RING_IDS, ...RING_ELIGIBLE_METRICS.map((def) => def.id)].find(
+          (metricId) => getMetricDef(metricId) && !used.has(metricId)
+        ) ?? fallback;
+    }
+
+    used.add(id);
+    return id;
+  });
+
+  return widgetMetrics as [string, string, string];
+}
+
 /**
  * Parse stored prefs, tolerating unknown ids from older app versions.
  * `legacyGreenId` migrates the pre-prefs single green-ring choice.
@@ -99,8 +124,10 @@ export function decodePrefs(rawJson: string | null, legacyGreenId: string | null
   if (rawJson) {
     try {
       const parsed = JSON.parse(rawJson) as Partial<DashboardPrefs>;
+      const rings = normalizeRings(parsed.rings);
       return {
-        rings: normalizeRings(parsed.rings),
+        rings,
+        widgetMetrics: normalizeWidgetMetrics(parsed.widgetMetrics, rings),
         goals: normalizeGoals(parsed.goals),
         cards: normalizeCards(parsed.cards),
       };
@@ -113,6 +140,7 @@ export function decodePrefs(rawJson: string | null, legacyGreenId: string | null
 
   if (legacyGreenId && getMetricDef(legacyGreenId)?.ring) {
     prefs.rings = normalizeRings([prefs.rings[0], prefs.rings[1], legacyGreenId]);
+    prefs.widgetMetrics = normalizeWidgetMetrics(null, prefs.rings);
   }
 
   return prefs;
