@@ -1,10 +1,10 @@
 import { Stack, useRouter } from 'expo-router';
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
-import Animated, { FadeInDown } from 'react-native-reanimated';
 
 import { LoadingDots } from '@/components/loading';
 import { MetricIcon } from '@/components/metric-icon';
+import { Section, SectionHeader, TextButton } from '@/components/section';
 import { ThemedText } from '@/components/themed-text';
 import { WidgetEditor } from '@/components/widget-editor';
 import { ErrorRed, MaxContentWidth, Spacing } from '@/constants/theme';
@@ -14,19 +14,19 @@ import { unregisterWidgetRefresh } from '@/lib/background-refresh';
 import { loadDashboardPrefs, saveDashboardPrefs } from '@/lib/dashboard-prefs';
 import { defaultPrefs, type DashboardPrefs } from '@/lib/dashboard-prefs-core';
 import { ensureFreshToken } from '@/lib/google-auth';
-import { clearSnapshotCache, getCachedSnapshot, setCachedSnapshot } from '@/lib/health-cache';
 import {
-  fetchGoogleHealthSnapshot,
-  fetchHealthMetrics,
-  type GoogleTokenResponse,
+    fetchGoogleHealthSnapshot,
+    fetchHealthMetrics,
+    type GoogleTokenResponse,
 } from '@/lib/google-health';
+import { clearSnapshotCache, getCachedSnapshot, setCachedSnapshot } from '@/lib/health-cache';
 import { getMetricDef } from '@/lib/metric-catalog';
 import { clearStoredToken, loadStoredToken, saveStoredToken } from '@/lib/token-store';
 import {
-  WIDGET_SLOT_COLORS,
-  buildWidgetData,
-  emptyWidgetData,
-  getWidgetMetricIds,
+    WIDGET_SLOT_COLORS,
+    buildWidgetData,
+    emptyWidgetData,
+    getWidgetMetricIds,
 } from '@/lib/widget-data';
 import { syncWidgets } from '@/lib/widget-sync';
 
@@ -454,6 +454,27 @@ export default function SettingsScreen() {
           </Section>
         )}
 
+        <Section index={Platform.OS === 'ios' ? 4 : 3}>
+          <SectionHeader title="Experimental" />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open Fitbit Bluetooth lab"
+            onPress={() => router.push('/fitbit-ble')}
+            style={({ pressed }) => [
+              styles.bluetoothCard,
+              { backgroundColor: theme.card },
+              pressed && styles.pressed,
+            ]}
+          >
+            <View style={styles.bluetoothCopy}>
+              <ThemedText type="smallBold">Fitbit Bluetooth</ThemedText>
+              <ThemedText type="small" style={{ color: theme.textSecondary }}>
+                Scan and inspect nearby Aria Air BLE services.
+              </ThemedText>
+            </View>
+          </Pressable>
+        </Section>
+
         <WidgetEditor
           visible={widgetEditorOpen}
           slots={prefs.widgetMetrics}
@@ -465,51 +486,6 @@ export default function SettingsScreen() {
       </View>
       </ScrollView>
     </>
-  );
-}
-
-function Section({ index, children }: { index: number; children: ReactNode }) {
-  return (
-    <Animated.View
-      entering={FadeInDown.duration(450).delay(index * 70)}
-      style={{ gap: Spacing.three }}
-    >
-      {children}
-    </Animated.View>
-  );
-}
-
-function SectionHeader({ title, trailing }: { title: string; trailing?: ReactNode }) {
-  return (
-    <View style={styles.sectionHeader}>
-      <ThemedText type="subtitle">{title}</ThemedText>
-      {trailing}
-    </View>
-  );
-}
-
-function TextButton({
-  label,
-  onPress,
-  disabled,
-  color,
-}: {
-  label: string;
-  onPress?: () => void;
-  disabled?: boolean;
-  color: string;
-}) {
-  return (
-    <Pressable
-      disabled={disabled}
-      onPress={onPress}
-      hitSlop={8}
-      style={({ pressed }) => [disabled && styles.disabled, pressed && !disabled && styles.pressed]}
-    >
-      <ThemedText type="smallBold" style={{ color }}>
-        {label}
-      </ThemedText>
-    </Pressable>
   );
 }
 
@@ -526,12 +502,6 @@ const styles = StyleSheet.create({
     width: '100%',
     maxWidth: MaxContentWidth,
     gap: Spacing.four,
-  },
-  sectionHeader: {
-    flexDirection: 'row',
-    alignItems: 'baseline',
-    justifyContent: 'space-between',
-    gap: Spacing.three,
   },
   accountCard: {
     flexDirection: 'row',
@@ -579,6 +549,14 @@ const styles = StyleSheet.create({
     padding: Spacing.three,
   },
   appleHealthCopy: {
+    gap: Spacing.half,
+  },
+  bluetoothCard: {
+    borderRadius: RADIUS,
+    borderCurve: 'continuous',
+    padding: Spacing.three,
+  },
+  bluetoothCopy: {
     gap: Spacing.half,
   },
   segments: {
