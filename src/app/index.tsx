@@ -1,58 +1,61 @@
-import * as ExpoCrypto from 'expo-crypto';
-import { Link, useFocusEffect } from 'expo-router';
-import { SymbolView, type SFSymbol } from 'expo-symbols';
-import * as WebBrowser from 'expo-web-browser';
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Link, router, useFocusEffect, useLocalSearchParams, type Href } from 'expo-router';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import Animated, { FadeInDown, FadeOut, LinearTransition } from 'react-native-reanimated';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ActivityRings, type RingSlot } from '@/components/activity-rings';
 import { CardEditor } from '@/components/card-editor';
 import { LoadingDots, SkeletonCard } from '@/components/loading';
 import { MetricCard } from '@/components/metric-card';
+import { MetricIcon } from '@/components/metric-icon';
+import { Section, SectionHeader, TextButton } from '@/components/section';
 import { SleepCard } from '@/components/sleep-card';
 import { ThemedText } from '@/components/themed-text';
 import { ErrorRed, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
-import { fetchApiJson, getApiBaseUrl } from '@/lib/api-base';
-import { DEBUG_ENABLED } from '@/lib/debug';
-import { ensureFreshToken } from '@/lib/google-auth';
-import {
-  clearSnapshotCache,
-  getCachedSnapshot,
-  isSnapshotFresh,
-  setCachedSnapshot,
-} from '@/lib/health-cache';
+import { getApiBaseUrl } from '@/lib/api-base';
 import { registerWidgetRefresh } from '@/lib/background-refresh';
 import { loadDashboardPrefs, saveDashboardPrefs } from '@/lib/dashboard-prefs';
 import { defaultPrefs, type DashboardPrefs } from '@/lib/dashboard-prefs-core';
+import { DEBUG_ENABLED } from '@/lib/debug';
+import {
+    completeGoogleOAuth,
+    ensureFreshToken,
+    fetchGoogleConfig,
+    GOOGLE_NATIVE_REDIRECT_URI,
+    requireReadyGoogleConfig,
+    resolveGoogleConfig,
+    startGoogleOAuth,
+} from '@/lib/google-auth';
+import {
+    fetchGoogleHealthSnapshot,
+    fetchHealthMetrics,
+    mergeSnapshotMetrics,
+    type GoogleHealthConfig,
+    type GoogleTokenResponse,
+    type HealthMetric,
+    type HealthSnapshot,
+} from '@/lib/google-health';
+import {
+    clearSnapshotCache,
+    getCachedSnapshot,
+    isSnapshotFresh,
+    setCachedSnapshot,
+} from '@/lib/health-cache';
 import { getDefaultGoal, getMetricDef, SLEEP_CARD_ID } from '@/lib/metric-catalog';
+import { pickOAuthParams } from '@/lib/oauth-params';
 import { clearStoredToken, loadStoredToken, saveStoredToken } from '@/lib/token-store';
 import {
-  buildWidgetData,
-  emptyWidgetData,
-  getWidgetMetricIds,
+    buildWidgetData,
+    emptyWidgetData,
+    getWidgetMetricIds,
 } from '@/lib/widget-data';
 import { syncWidgets } from '@/lib/widget-sync';
-import {
-  fetchGoogleHealthSnapshot,
-  fetchHealthMetrics,
-  GOOGLE_HEALTH_SCOPES,
-  GOOGLE_OAUTH_DISCOVERY,
-  mergeSnapshotMetrics,
-  type GoogleHealthConfig,
-  type GoogleTokenResponse,
-  type HealthMetric,
-  type HealthSnapshot,
-} from '@/lib/google-health';
-
-WebBrowser.maybeCompleteAuthSession();
 
 type LoadState = 'idle' | 'loading' | 'loaded' | 'error';
 type DashboardRangeDays = 1 | 7 | 14 | 30 | 90;
 
-const GOOGLE_NATIVE_REDIRECT_URI = 'fitty:/oauth';
-const SETTINGS_SYMBOL = { ios: 'gearshape' as SFSymbol };
 const RANGE_OPTIONS: { label: string; value: DashboardRangeDays }[] = [
   { label: 'Today', value: 1 },
   { label: '7D', value: 7 },
@@ -60,38 +63,21 @@ const RANGE_OPTIONS: { label: string; value: DashboardRangeDays }[] = [
   { label: '30D', value: 30 },
   { label: '90D', value: 90 },
 ];
-
-function createOAuthState(appReturnUri: string) {
-  return `${ExpoCrypto.randomUUID()}.${encodeURIComponent(appReturnUri)}`;
-}
-
-function buildGoogleAuthUrl(config: GoogleHealthConfig, state: string) {
-  const url = new URL(GOOGLE_OAUTH_DISCOVERY.authorizationEndpoint);
-  url.searchParams.set('client_id', config.clientId);
-  url.searchParams.set('redirect_uri', config.redirectUri);
-  url.searchParams.set('response_type', 'code');
-  url.searchParams.set('scope', GOOGLE_HEALTH_SCOPES.join(' '));
-  url.searchParams.set('access_type', 'offline');
-  url.searchParams.set('prompt', 'consent');
-  url.searchParams.set('state', state);
-
-  if (Platform.OS === 'web') {
-    url.searchParams.set('include_granted_scopes', 'true');
-  }
-
-  return url.toString();
-}
-
-function isGoogleConfigReady(config: GoogleHealthConfig | null): config is GoogleHealthConfig {
-  return Boolean(config?.clientId && config.hasClientSecret && config.redirectUri && config.appReturnUri);
-}
-
-async function fetchGoogleConfig() {
-  return fetchApiJson<GoogleHealthConfig>(`/api/google/config?platform=${Platform.OS}`);
-}
+const LEGAL_LINKS: { href: Href; label: string }[] = [
+  { href: '/privacy', label: 'Privacy' },
+  { href: '/terms', label: 'Terms' },
+  { href: '/support', label: 'Support' },
+];
 
 export default function HomeScreen() {
   const theme = useTheme();
+  const insets = useSafeAreaInsets();
+  const routeParams = useLocalSearchParams<Record<string, string | string[]>>();
+  // Serialized so the completion effect below runs once per distinct return.
+  const routeOAuthQuery = useMemo(
+    () => new URLSearchParams(pickOAuthParams(routeParams)).toString(),
+    [routeParams]
+  );
   const [config, setConfig] = useState<GoogleHealthConfig | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [token, setToken] = useState<GoogleTokenResponse | null>(null);
@@ -373,68 +359,107 @@ export default function HomeScreen() {
     };
   }, [loadHealthData]);
 
-  const startGoogleSignIn = useCallback(async () => {
-    setAuthState('loading');
-    setError(null);
-
-    try {
-      const activeConfig = isGoogleConfigReady(config) ? config : await fetchGoogleConfig();
-
-      setConfig(activeConfig);
-      setConfigError(null);
-
-      if (!isGoogleConfigReady(activeConfig)) {
-        throw new Error('Google OAuth config is incomplete. Check the API server environment.');
-      }
-
-      const appReturnUri = activeConfig.appReturnUri || GOOGLE_NATIVE_REDIRECT_URI;
-      const state = createOAuthState(appReturnUri);
-      const result = await WebBrowser.openAuthSessionAsync(
-        buildGoogleAuthUrl(activeConfig, state),
-        appReturnUri
-      );
-
-      if (result.type !== 'success') {
-        setAuthState(token ? 'loaded' : 'idle');
-        return;
-      }
-
-      const returnUrl = new URL(result.url);
-      const returnedState = returnUrl.searchParams.get('state');
-      const oauthError = returnUrl.searchParams.get('error');
-      const code = returnUrl.searchParams.get('code');
-
-      if (oauthError) {
-        throw new Error(oauthError);
-      }
-
-      if (returnedState !== state) {
-        throw new Error('Google OAuth state did not match. Try signing in again.');
-      }
-
-      // The callback forwards the one-time code; exchange it server-side
-      // (stateless — no session has to survive between serverless requests).
-      // Fall back to the legacy session lookup for older server deployments.
-      const nextToken = code
-        ? await fetchApiJson<GoogleTokenResponse>('/api/google/token', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ code, redirectUri: activeConfig.redirectUri }),
-          })
-        : await fetchApiJson<GoogleTokenResponse>(
-            `/api/google/session?state=${encodeURIComponent(state)}`
-          );
+  const handleSignedIn = useCallback(
+    async (nextToken: GoogleTokenResponse) => {
       // A fresh sign-in may be a different account — drop any cached data.
       clearSnapshotCache();
       setToken(nextToken);
       setAuthState('loaded');
       await saveStoredToken(nextToken).catch(() => undefined);
       await loadHealthData(nextToken.accessToken, rangeDays);
+    },
+    [loadHealthData, rangeDays]
+  );
+
+  // Latest values for the route-return effect, which must run once per OAuth
+  // return rather than re-running as config or range state settles.
+  const configRef = useRef(config);
+  const handleSignedInRef = useRef(handleSignedIn);
+  useEffect(() => {
+    configRef.current = config;
+    handleSignedInRef.current = handleSignedIn;
+  }, [config, handleSignedIn]);
+
+  // Completes a sign-in that returned via deep link / URL params. The browser
+  // redirect may arrive after an app restart, so validation relies on the
+  // persisted pending state rather than any in-memory sign-in attempt.
+  useEffect(() => {
+    if (!routeOAuthQuery) {
+      return;
+    }
+
+    let ignore = false;
+
+    async function completeRouteOAuth() {
+      setAuthState('loading');
+      setError(null);
+
+      try {
+        const activeConfig = await resolveGoogleConfig(configRef.current);
+
+        if (ignore) {
+          return;
+        }
+
+        setConfig(activeConfig);
+        setConfigError(null);
+
+        const readyConfig = requireReadyGoogleConfig(activeConfig);
+        const nextToken = await completeGoogleOAuth(
+          new URLSearchParams(routeOAuthQuery),
+          readyConfig
+        );
+
+        if (nextToken) {
+          await handleSignedInRef.current(nextToken);
+        }
+      } catch (routeOAuthError) {
+        if (!ignore) {
+          setError(routeOAuthError instanceof Error ? routeOAuthError.message : String(routeOAuthError));
+          setAuthState('error');
+        }
+      } finally {
+        if (!ignore) {
+          router.replace('/');
+        }
+      }
+    }
+
+    completeRouteOAuth();
+
+    return () => {
+      ignore = true;
+    };
+  }, [routeOAuthQuery]);
+
+  const startGoogleSignIn = useCallback(async () => {
+    setAuthState('loading');
+    setError(null);
+
+    try {
+      const activeConfig = await resolveGoogleConfig(config);
+
+      setConfig(activeConfig);
+      setConfigError(null);
+
+      const readyConfig = requireReadyGoogleConfig(activeConfig);
+      const result = await startGoogleOAuth(readyConfig);
+
+      if (result.type !== 'success') {
+        setAuthState(token ? 'loaded' : 'idle');
+        return;
+      }
+
+      const nextToken = await completeGoogleOAuth(result.params, readyConfig, result.state);
+
+      if (nextToken) {
+        await handleSignedIn(nextToken);
+      }
     } catch (signInError) {
       setError(signInError instanceof Error ? signInError.message : String(signInError));
       setAuthState('error');
     }
-  }, [config, loadHealthData, rangeDays, token]);
+  }, [config, handleSignedIn, token]);
 
   // Refreshes the access token when it is about to expire, then loads data.
   const loadWithFreshToken = useCallback(
@@ -647,8 +672,26 @@ export default function HomeScreen() {
         <View style={styles.signInContent}>
           <ThemedText type="hero">OpenFit</ThemedText>
           <ThemedText type="small" style={{ color: theme.textSecondary }}>
-            Connects to Google Fit
+            Connects to Google Health
           </ThemedText>
+          <View style={styles.signInDisclosureBlock}>
+            <ThemedText type="small" style={[styles.signInDisclosure, { color: theme.textSecondary }]}>
+              OpenFit reads the Google Health data you authorize to show your personal dashboard,
+              widgets, and optional Apple Health export. OpenFit does not sell Google Health data or
+              share it with advertisers.
+            </ThemedText>
+            <View style={styles.legalLinks}>
+              {LEGAL_LINKS.map((link) => (
+                <Link key={link.label} href={link.href} asChild>
+                  <Pressable hitSlop={8}>
+                    <ThemedText type="smallBold" style={{ color: theme.text }}>
+                      {link.label}
+                    </ThemedText>
+                  </Pressable>
+                </Link>
+              ))}
+            </View>
+          </View>
 
           {error && <ErrorBanner message={error} />}
 
@@ -680,65 +723,75 @@ export default function HomeScreen() {
 
   // ── Authenticated dashboard ──
   return (
-    <ScrollView
-      style={{ flex: 1, backgroundColor: theme.background }}
-      contentContainerStyle={styles.scrollContent}
-      contentInsetAdjustmentBehavior="automatic"
+    <View
+      style={[
+        styles.dashboardScreen,
+        {
+          backgroundColor: theme.background,
+          paddingTop: Platform.OS === 'android' ? insets.top : 0,
+          paddingBottom: Platform.OS === 'android' ? Math.max(insets.bottom, Spacing.four) : 0,
+        },
+      ]}
     >
-      <View style={styles.container}>
-        {/* ── Header ── */}
-        <Section index={0}>
-          <View style={styles.headerBlock}>
-            <View style={styles.headerTopRow}>
-              <ThemedText type="smallBold" style={[styles.dateLabel, { color: theme.textSecondary }]}>
-                {todayStr}
-              </ThemedText>
-              <View style={styles.headerButtons}>
-                <Link href="/settings" asChild>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel="Settings"
-                    hitSlop={8}
-                    style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}
-                  >
-                    <SymbolView
-                      name={SETTINGS_SYMBOL}
-                      fallback={
-                        <ThemedText type="smallBold" style={{ color: theme.textSecondary }}>
-                          Settings
-                        </ThemedText>
-                      }
-                      size={22}
-                      tintColor={theme.textSecondary}
-                    />
-                  </Pressable>
-                </Link>
+      <ScrollView
+        style={{ flex: 1, backgroundColor: theme.background }}
+        contentContainerStyle={[
+          styles.scrollContent,
+          {
+            paddingTop:
+              Platform.OS === 'android'
+                ? Spacing.four
+                : Math.max(Spacing.four, insets.top + Spacing.three),
+            paddingBottom: Math.max(Spacing.six, insets.bottom + Spacing.six),
+          },
+        ]}
+        contentInsetAdjustmentBehavior={Platform.OS === 'ios' ? 'automatic' : 'never'}
+      >
+        <View style={styles.container}>
+          {/* ── Header ── */}
+          <Section index={0}>
+            <View style={styles.headerBlock}>
+              <View style={styles.headerTopRow}>
+                <ThemedText type="smallBold" style={[styles.dateLabel, { color: theme.textSecondary }]}>
+                  {todayStr}
+                </ThemedText>
+                <View style={styles.headerButtons}>
+                  <Link href="/settings" asChild>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Settings"
+                      hitSlop={8}
+                      style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}
+                    >
+                      <MetricIcon icon="gearshape" glyph="⚙" size={24} color={theme.textSecondary} />
+                    </Pressable>
+                  </Link>
+                </View>
               </View>
+              <ThemedText type="title">{greeting}</ThemedText>
             </View>
-            <ThemedText type="title">{greeting}</ThemedText>
-          </View>
-        </Section>
+          </Section>
 
-        {error && <ErrorBanner message={error} />}
+          {error && <ErrorBanner message={error} />}
 
-        {/* ── Range segmented control ── */}
-        <Section index={1}>
-          <View style={[styles.segments, { backgroundColor: theme.backgroundSelected }]}>
-            {RANGE_OPTIONS.map((option) => {
-              const active = rangeDays === option.value;
-              return (
-                <Pressable
-                  key={option.value}
-                  disabled={initialLoading}
-                  onPress={() => updateRangeDays(option.value)}
-                  style={({ pressed }) => [
-                    styles.segment,
-                    active && { backgroundColor: theme.text },
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <ThemedText
-                    type="smallBold"
+          {/* ── Range segmented control ── */}
+          <Section index={1}>
+            <View style={[styles.segments, { backgroundColor: theme.backgroundSelected }]}>
+              {RANGE_OPTIONS.map((option) => {
+                const active = rangeDays === option.value;
+                return (
+                  <Pressable
+                    key={option.value}
+                    disabled={initialLoading}
+                    onPress={() => updateRangeDays(option.value)}
+                    style={({ pressed }) => [
+                      styles.segment,
+                      active && { backgroundColor: theme.text },
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <ThemedText
+                      type="smallBold"
                     style={{ color: active ? theme.background : theme.textSecondary }}
                   >
                     {option.label}
@@ -838,31 +891,11 @@ export default function HomeScreen() {
         )}
       </View>
     </ScrollView>
+    </View>
   );
 }
 
 // ─── Sub-components ────────────────────────────────────────────────────────────
-
-/** Staggered entrance for dashboard sections — one orchestrated page load. */
-function Section({ index, children }: { index: number; children: ReactNode }) {
-  return (
-    <Animated.View
-      entering={FadeInDown.duration(450).delay(index * 70)}
-      style={{ gap: Spacing.three }}
-    >
-      {children}
-    </Animated.View>
-  );
-}
-
-function SectionHeader({ title, trailing }: { title: string; trailing?: ReactNode }) {
-  return (
-    <View style={styles.sectionHeader}>
-      <ThemedText type="subtitle">{title}</ThemedText>
-      {trailing}
-    </View>
-  );
-}
 
 function ActionButton({
   label,
@@ -886,31 +919,6 @@ function ActionButton({
         pressed && !disabled && styles.pressed,
       ]}>
       <ThemedText type="default" style={{ color: theme.background, fontWeight: 600 }}>
-        {label}
-      </ThemedText>
-    </Pressable>
-  );
-}
-
-function TextButton({
-  label,
-  onPress,
-  disabled,
-  color,
-}: {
-  label: string;
-  onPress?: () => void;
-  disabled?: boolean;
-  color: string;
-}) {
-  return (
-    <Pressable
-      disabled={disabled}
-      onPress={onPress}
-      hitSlop={8}
-      style={({ pressed }) => [disabled && styles.disabled, pressed && !disabled && styles.pressed]}
-    >
-      <ThemedText type="smallBold" style={{ color }}>
         {label}
       </ThemedText>
     </Pressable>
@@ -1038,6 +1046,9 @@ function decodeIdToken(idToken: string): { name?: string; given_name?: string; e
 const RADIUS = 12;
 
 const styles = StyleSheet.create({
+  dashboardScreen: {
+    flex: 1,
+  },
   scrollContent: {
     alignItems: 'center',
     paddingHorizontal: Spacing.three,
@@ -1091,12 +1102,6 @@ const styles = StyleSheet.create({
     borderCurve: 'continuous',
     paddingVertical: Spacing.four,
     paddingHorizontal: Spacing.three,
-  },
-  sectionHeader: {
-    flexDirection: 'row',
-    alignItems: 'baseline',
-    justifyContent: 'space-between',
-    gap: Spacing.three,
   },
   metricGrid: {
     flexDirection: 'row',
@@ -1153,6 +1158,8 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    paddingTop: Spacing.six,
+    paddingBottom: Spacing.six * 3,
   },
   signInContent: {
     width: '100%',
@@ -1160,5 +1167,21 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: Spacing.four,
     gap: Spacing.four,
+  },
+  signInDisclosureBlock: {
+    width: '100%',
+    maxWidth: 440,
+    gap: Spacing.two,
+    alignItems: 'center',
+  },
+  signInDisclosure: {
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  legalLinks: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: Spacing.three,
   },
 });

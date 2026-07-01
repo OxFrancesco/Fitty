@@ -2,6 +2,8 @@ import { GOOGLE_HEALTH_SCOPES } from '@/lib/google-health';
 import {
   getConfiguredGoogleCallbackUri,
   getGoogleAppReturnUri,
+  getGoogleCallbackUri,
+  getUrlOrigin,
 } from '@/lib/google-oauth-server';
 
 const corsHeaders = {
@@ -17,15 +19,19 @@ export function OPTIONS() {
 export function GET(request: Request) {
   const requestUrl = new URL(request.url);
   const isWeb = requestUrl.searchParams.get('platform') === 'web';
-  const configuredRedirectUri = getConfiguredGoogleCallbackUri();
-  const redirectUri = configuredRedirectUri ?? `${requestUrl.origin}/api/google/callback`;
+  const localRedirectUri = `${requestUrl.origin}/api/google/callback`;
+  const redirectUri =
+    process.env.NODE_ENV === 'development'
+      ? (getConfiguredGoogleCallbackUri() ?? localRedirectUri)
+      : getGoogleCallbackUri();
+  const webReturnUri = getUrlOrigin(redirectUri) ?? requestUrl.origin;
 
   return Response.json(
     {
       clientId: process.env.GOOGLE_CLIENT_ID ?? '',
       hasClientSecret: Boolean(process.env.GOOGLE_CLIENT_SECRET),
-      redirectUri: isWeb ? `${requestUrl.origin}/api/google/callback` : redirectUri,
-      appReturnUri: isWeb ? requestUrl.origin : getGoogleAppReturnUri(),
+      redirectUri,
+      appReturnUri: isWeb ? webReturnUri : getGoogleAppReturnUri(),
       scopes: GOOGLE_HEALTH_SCOPES,
     },
     { headers: corsHeaders }

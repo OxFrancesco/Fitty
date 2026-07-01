@@ -1,7 +1,7 @@
 import type { GoogleTokenResponse } from '@/lib/google-health';
 
 const DEFAULT_GOOGLE_CALLBACK_URI = 'https://avg-francesco-fitty.expo.app/api/google/callback';
-const DEFAULT_APP_RETURN_URI = 'fitty:/oauth';
+const DEFAULT_APP_RETURN_URI = 'fitty://oauth';
 const SESSION_TTL_MS = 2 * 60 * 1000;
 
 type OAuthStore = Map<string, { token: GoogleTokenResponse; expiresAt: number }>;
@@ -12,6 +12,19 @@ type ExchangeGoogleCodeInput = {
   codeVerifier?: string;
   includeClientSecret?: boolean;
 };
+
+/** Origin of a URL string, or null when the value is missing or unparsable. */
+export function getUrlOrigin(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    return new URL(value).origin;
+  } catch {
+    return null;
+  }
+}
 
 const storeKey = Symbol.for('fitty.googleOAuthSessions');
 
@@ -46,7 +59,14 @@ export function getConfiguredGoogleCallbackUri() {
 }
 
 export function getGoogleAppReturnUri() {
-  return process.env.EXPO_PUBLIC_GOOGLE_APP_RETURN_URI ?? process.env.GOOGLE_APP_RETURN_URI ?? DEFAULT_APP_RETURN_URI;
+  const returnUri =
+    process.env.EXPO_PUBLIC_GOOGLE_APP_RETURN_URI ??
+    process.env.GOOGLE_APP_RETURN_URI ??
+    DEFAULT_APP_RETURN_URI;
+
+  // Older env configs wrote custom-scheme URIs with a single slash
+  // (`fitty:/oauth`); normalize to the canonical `scheme://path` form.
+  return returnUri.replace(/^([a-zA-Z][\w.+-]*):\/(?!\/)/, '$1://');
 }
 
 export function storeGoogleOAuthSession(state: string, token: GoogleTokenResponse) {

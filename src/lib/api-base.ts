@@ -48,7 +48,10 @@ export function getApiBaseUrl() {
   if (explicitBaseUrl) {
     const normalizedExplicitBaseUrl = trimTrailingSlash(explicitBaseUrl);
 
-    if (__DEV__ || !isLocalApiBaseUrl(normalizedExplicitBaseUrl)) {
+    // On native, an explicit localhost/LAN base URL is ignored in favor of the
+    // Metro-derived origin below — the URL that works in a desktop browser is
+    // usually unreachable from a device, and dev auto-detection does better.
+    if (Platform.OS === 'web' || !isLocalApiBaseUrl(normalizedExplicitBaseUrl)) {
       return normalizedExplicitBaseUrl;
     }
   }
