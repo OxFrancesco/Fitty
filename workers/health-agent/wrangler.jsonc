@@ -1,0 +1,33 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "openfit-health-agent",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "FittyHealthAgent",
+        "class_name": "FittyHealthAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["FittyHealthAgent"]
+    }
+  ],
+  "ai": {
+    "binding": "AI"
+  },
+  "vars": {
+    "GOOGLE_CLIENT_ID": "replace-with-google-oauth-client-id",
+    "GOOGLE_REDIRECT_URI": "https://openfit-health-agent.<your-subdomain>.workers.dev/oauth/callback",
+    "ALLOWED_ORIGINS": "https://avg-francesco-fitty.expo.app,fitty://oauth,com.francescooddo.fitty://oauth",
+    "AI_MODEL": "@cf/zai-org/glm-4.7-flash"
+  },
+  "observability": {
+    "enabled": true
+  }
+}
