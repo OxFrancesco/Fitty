@@ -1,65 +1,58 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PermissionsAndroid, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
-import { BleManager, ScanMode, State, type Subscription } from 'react-native-ble-plx';
+import { BleManager, State, fullUUID, type Subscription } from 'react-native-ble-plx';
 
 import {
-    mergeDevice,
-    summarizeService,
-    updateCharacteristicMonitorError,
-    updateCharacteristicMonitoring,
-    updateCharacteristicValue,
-    type CharacteristicSummary,
-    type DataEvent,
-    type ScannedDevice,
-    type ServiceSummary,
+  mergeDevice,
+  summarizeService,
+  updateCharacteristicMonitorError,
+  updateCharacteristicMonitoring,
+  updateCharacteristicValue,
+  type CharacteristicSummary,
+  type DataEvent,
+  type ScannedDevice,
+  type ServiceSummary,
 } from '@/components/fitbit-ble-lab-model';
 import { Section, SectionHeader } from '@/components/section';
 import { ThemedText } from '@/components/themed-text';
 import { ErrorRed, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import {
-    WEIGHT_SCALE_SERVICE,
-    base64ToBytes,
-    bytesToHex,
-    decodeCharacteristicValue,
-    formatError,
-    labelForUuid,
-    shortUuid,
-    type DecodedValue,
+  WEIGHT_SCALE_SERVICE,
+  base64ToBytes,
+  bytesToHex,
+  decodeCharacteristicValue,
+  formatError,
+  labelForUuid,
+  shortUuid,
+  type DecodedValue,
 } from '@/lib/ble-gatt';
 
 type LoadState = 'idle' | 'loading' | 'loaded' | 'error';
 type PermissionState = 'idle' | 'granted' | 'denied';
 type BleState = State | 'Unavailable';
 
-const SCAN_TIMEOUT_MS = 15_000;
 const BLE_STATE_SETTLE_TIMEOUT_MS = 5_000;
+
+const CONNECTED_LOOKUP_SERVICES = ['1800', '1801', '180a', '180f', '181b', '181d'].map(fullUUID);
 
 const RADIUS = 12;
 
 export function FitbitBleLab() {
   const theme = useTheme();
   const managerRef = useRef<BleManager | null>(null);
-  const scanTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const monitorsRef = useRef<Subscription[]>([]);
   const connectedDeviceIdRef = useRef<string | null>(null);
   const eventCounterRef = useRef(0);
   const [bleState, setBleState] = useState<BleState>(State.Unknown);
   const [permissionState, setPermissionState] = useState<PermissionState>('idle');
-  const [scanState, setScanState] = useState<LoadState>('idle');
+  const [listState, setListState] = useState<LoadState>('idle');
   const [connectionState, setConnectionState] = useState<LoadState>('idle');
   const [devices, setDevices] = useState<Record<string, ScannedDevice>>({});
   const [connectedDevice, setConnectedDevice] = useState<ScannedDevice | null>(null);
   const [services, setServices] = useState<ServiceSummary[]>([]);
   const [dataEvents, setDataEvents] = useState<DataEvent[]>([]);
   const [message, setMessage] = useState<string | null>(null);
-
-  const clearScanTimer = useCallback(() => {
-    if (scanTimerRef.current) {
-      clearTimeout(scanTimerRef.current);
-      scanTimerRef.current = null;
-    }
-  }, []);
 
   const clearMonitors = useCallback(() => {
     for (const subscription of monitorsRef.current) {
@@ -68,15 +61,6 @@ export function FitbitBleLab() {
 
     monitorsRef.current = [];
   }, []);
-
-  const stopScan = useCallback(
-    (nextState: LoadState = 'loaded') => {
-      clearScanTimer();
-      managerRef.current?.stopDeviceScan().catch(() => undefined);
-      setScanState(nextState);
-    },
-    [clearScanTimer]
-  );
 
   const appendDataEvent = useCallback(
     ({
@@ -144,9 +128,7 @@ export function FitbitBleLab() {
 
     return () => {
       stateSubscription.remove();
-      clearScanTimer();
       clearMonitors();
-      manager.stopDeviceScan().catch(() => undefined);
 
       if (connectedDeviceIdRef.current) {
         manager.cancelDeviceConnection(connectedDeviceIdRef.current).catch(() => undefined);
@@ -155,7 +137,7 @@ export function FitbitBleLab() {
       manager.destroy().catch(() => undefined);
       managerRef.current = null;
     };
-  }, [clearMonitors, clearScanTimer]);
+  }, [clearMonitors]);
 
   const sortedDevices = useMemo(
     () =>
@@ -164,21 +146,21 @@ export function FitbitBleLab() {
           return a.isLikelyFitbit ? -1 : 1;
         }
 
-        return (b.rssi ?? -999) - (a.rssi ?? -999);
+        return a.name.localeCompare(b.name);
       }),
     [devices]
   );
 
-  const startScan = useCallback(async () => {
+  const loadConnectedDevices = useCallback(async () => {
     const manager = managerRef.current;
 
     if (!manager) {
       setMessage('Bluetooth module is not available in this build.');
-      setScanState('error');
+      setListState('error');
       return;
     }
 
-    setScanState('loading');
+    setListState('loading');
     setMessage('Checking Bluetooth state.');
 
     const hasPermission = await requestBlePermissions();
@@ -186,7 +168,7 @@ export function FitbitBleLab() {
 
     if (!hasPermission) {
       setMessage('Bluetooth permission was denied.');
-      setScanState('error');
+      setListState('error');
       return;
     }
 
@@ -194,41 +176,29 @@ export function FitbitBleLab() {
 
     if (currentState !== State.PoweredOn) {
       setMessage(messageForBleState(currentState));
-      setScanState('error');
+      setListState('error');
       return;
     }
 
     setMessage(null);
     setDevices({});
-    setScanState('loading');
-    manager.stopDeviceScan().catch(() => undefined);
 
     try {
-      await manager.startDeviceScan(
-        null,
-        { allowDuplicates: false, scanMode: ScanMode.LowLatency },
-        (error, device) => {
-          if (error) {
-            setMessage(formatError(error));
-            stopScan('error');
-            return;
-          }
+      const connected = await manager.connectedDevices(CONNECTED_LOOKUP_SERVICES);
 
-          if (device) {
-            setDevices((current) => mergeDevice(current, device));
-          }
-        }
+      setDevices(
+        connected.reduce<Record<string, ScannedDevice>>((current, device) => mergeDevice(current, device), {})
       );
+      setListState('loaded');
 
-      clearScanTimer();
-      scanTimerRef.current = setTimeout(() => {
-        stopScan('loaded');
-      }, SCAN_TIMEOUT_MS);
+      if (connected.length === 0) {
+        setMessage('No connected BLE devices found. Connect the device in system Bluetooth settings first.');
+      }
     } catch (error) {
       setMessage(formatError(error));
-      setScanState('error');
+      setListState('error');
     }
-  }, [bleState, clearScanTimer, stopScan]);
+  }, [bleState]);
 
   const disconnect = useCallback(async () => {
     const manager = managerRef.current;
@@ -256,7 +226,6 @@ export function FitbitBleLab() {
         return;
       }
 
-      stopScan('loaded');
       clearMonitors();
       setConnectionState('loading');
       setConnectedDevice(device);
@@ -366,11 +335,11 @@ export function FitbitBleLab() {
         setMessage(formatError(error));
       }
     },
-    [appendDataEvent, clearMonitors, stopScan]
+    [appendDataEvent, clearMonitors]
   );
 
   const statusColor =
-    scanState === 'error' || connectionState === 'error' || permissionState === 'denied'
+    listState === 'error' || connectionState === 'error' || permissionState === 'denied'
       ? ErrorRed
       : theme.textSecondary;
 
@@ -384,7 +353,8 @@ export function FitbitBleLab() {
         <Section index={0}>
           <ThemedText type="title">Fitbit BLE Lab</ThemedText>
           <ThemedText type="small" style={{ color: theme.textSecondary }}>
-            Direct BLE access depends on what the scale exposes over GATT.
+            Lists only BLE devices already connected to this phone. Direct BLE access depends on what
+            the scale exposes over GATT.
           </ThemedText>
         </Section>
 
@@ -404,10 +374,10 @@ export function FitbitBleLab() {
         <Section index={2}>
           <View style={styles.actionRow}>
             <ActionButton
-              label={scanState === 'loading' ? 'Stop scan' : 'Scan'}
-              disabled={connectionState === 'loading'}
+              label={listState === 'loading' ? 'Loading' : 'Show connected'}
+              disabled={listState === 'loading' || connectionState === 'loading'}
               primary
-              onPress={scanState === 'loading' ? () => stopScan('loaded') : startScan}
+              onPress={loadConnectedDevices}
             />
             <ActionButton
               label="Disconnect"
@@ -421,11 +391,11 @@ export function FitbitBleLab() {
 
         <Section index={3}>
           <SectionHeader
-            title="Devices"
+            title="Connected Devices"
             trailing={
-              scanState === 'loading' ? (
+              listState === 'loading' ? (
                 <ThemedText type="small" numberOfLines={1} style={{ color: theme.textSecondary }}>
-                  Scanning
+                  Loading
                 </ThemedText>
               ) : null
             }
@@ -472,14 +442,13 @@ export function FitbitBleLab() {
                       </ThemedText>
                     ) : null}
                   </View>
-                  <ThemedText type="small" style={{ color: theme.textSecondary }}>
-                    {device.rssi == null ? 'RSSI -' : `${device.rssi} dBm`}
-                  </ThemedText>
                 </Pressable>
               ))
             ) : (
               <ThemedText type="small" style={{ color: theme.textSecondary }}>
-                {scanState === 'loading' ? 'Looking for nearby BLE devices.' : 'No devices scanned yet.'}
+                {listState === 'loading'
+                  ? 'Checking devices connected to this phone.'
+                  : 'No connected devices listed yet.'}
               </ThemedText>
             )}
           </View>
@@ -650,16 +619,14 @@ async function requestBlePermissions() {
     typeof Platform.Version === 'number'
       ? Platform.Version
       : Number.parseInt(String(Platform.Version), 10);
-  const permissions =
-    apiLevel >= 31
-      ? [
-          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-          PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-        ]
-      : [PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION];
-  const statuses = await PermissionsAndroid.requestMultiple(permissions);
 
-  return permissions.every((permission) => statuses[permission] === PermissionsAndroid.RESULTS.GRANTED);
+  if (apiLevel < 31) {
+    return true;
+  }
+
+  const status = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT);
+
+  return status === PermissionsAndroid.RESULTS.GRANTED;
 }
 
 async function waitForReadyBleState(
@@ -702,16 +669,16 @@ function isTransientBleState(state: BleState) {
 
 function messageForBleState(state: BleState) {
   if (state === State.PoweredOff) {
-    return 'Turn on Bluetooth before scanning.';
+    return 'Turn on Bluetooth first.';
   }
   if (state === State.Unauthorized) {
-    return 'Bluetooth permission is off for OpenFit. Enable it in iOS Settings, then scan again.';
+    return 'Bluetooth permission is off for OpenFit. Enable it in iOS Settings, then try again.';
   }
   if (state === State.Unsupported) {
-    return 'This device does not support Bluetooth LE scanning.';
+    return 'This device does not support Bluetooth LE.';
   }
   if (state === State.Resetting || state === State.Unknown) {
-    return 'Bluetooth is still initializing. Wait a moment, then scan again.';
+    return 'Bluetooth is still initializing. Wait a moment, then try again.';
   }
 
   return 'Bluetooth is not available in this build.';

@@ -18,7 +18,7 @@ export function FitbitBleLab() {
         <View style={[styles.card, { backgroundColor: theme.card }]}>
           <ThemedText type="smallBold">Native build required</ThemedText>
           <ThemedText type="small" style={{ color: theme.textSecondary }}>
-            Bluetooth scanning is available only in the iOS or Android development build.
+            Bluetooth access is available only in the iOS or Android development build.
           </ThemedText>
         </View>
       </View>
