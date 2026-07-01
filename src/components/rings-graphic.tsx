@@ -75,23 +75,20 @@ function Ring({ index, ring }: { index: number; ring: RingProgress }) {
   }, [ring.progress, ring.delay, progress]);
 
   const basePath = useMemo(() => {
-    const path = Skia.Path.Make();
-    points.forEach((p, i) => (i === 0 ? path.moveTo(p.x, p.y) : path.lineTo(p.x, p.y)));
-    path.close();
-    return path;
+    const builder = Skia.PathBuilder.Make();
+    points.forEach((p, i) => (i === 0 ? builder.moveTo(p.x, p.y) : builder.lineTo(p.x, p.y)));
+    return builder.close().build();
   }, [points]);
 
   // This heart's band — keeps shadows from bleeding into neighbors.
   const band = useMemo(() => {
-    const outline = basePath.copy();
-    return outline.stroke({ width: STROKE }) ? outline : basePath;
+    return Skia.Path.Stroke(basePath, { width: STROKE }) ?? basePath;
   }, [basePath]);
 
   // Arc of the lap currently being drawn (wraps past 100%).
   const arcPath = useDerivedValue(() => {
     const t = Math.min(Math.max(lapFraction(progress.value), 0.0001), 1);
-    const path = basePath.copy();
-    return path.trim(0, t, false) ?? path;
+    return Skia.Path.Trim(basePath, 0, t, false) ?? basePath;
   });
 
   const headPos = useDerivedValue(() => sampleLoop(points, lapFraction(progress.value)));
