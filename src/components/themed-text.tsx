@@ -65,7 +65,7 @@ const styles = StyleSheet.create({
     fontSize: 30,
     lineHeight: 36,
     fontWeight: 700,
-    letterSpacing: -0.4,
+    letterSpacing: 0,
   },
   subtitle: {
     fontSize: 20,
@@ -91,7 +91,7 @@ const styles = StyleSheet.create({
     lineHeight: 46,
     fontWeight: 700,
     fontVariant: ['tabular-nums'],
-    letterSpacing: -0.5,
+    letterSpacing: 0,
   },
   metric: {
     fontSize: 24,
